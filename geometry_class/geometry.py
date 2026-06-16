@@ -64,11 +64,11 @@ class Geometry:
 
         # 1. Create the outer boundary domain (world)
         # We use marker=-1 for the boundary soil, allowing it to grow (area=0)
-        # We make it slightly taller (0.2) than the core to avoid coplanar facets at Z=0.
+        # We stagger the heights (0.5, 0.3, 0.1) to avoid intersecting coplanar facets for robust meshing.
         world_depth = self.borehole_length * 2.5
         world = pg.meshtools.createCube(
-            size=[wx_dim, wy_dim, world_depth + 0.2],
-            pos=[0.0, 0.0, -world_depth / 2.0 + 0.1],
+            size=[wx_dim, wy_dim, world_depth + 0.5],
+            pos=[0.0, 0.0, -world_depth / 2.0 + 0.25],
             marker=-1,
             area=self.world_area
         )
@@ -80,9 +80,8 @@ class Geometry:
             m.setPos([safe_wx, 0.011, -world_depth / 2.0 + 0.0123])
 
         # 2. Create the inner core block for fine resolution
-        # We make it slightly taller (0.2) than the borehole to avoid coplanar facets.
         core = pg.meshtools.createCube(
-            size=[x_dim, y_dim, self.borehole_length + 0.2],
+            size=[x_dim, y_dim, self.borehole_length + 0.3],
             pos=[0.0, 0.0, -self.borehole_length / 2.0],
             marker=2,
             area=self.core_area
@@ -95,10 +94,9 @@ class Geometry:
             m.setPos([safe_x, 0.011, -self.borehole_length / 2.0 + 0.0123])
 
         # 3. Create the borehole cylinder
-        # We make it slightly taller (0.2) to match the core and avoid electrodes exactly on the top/bottom boundary faces losing marker 99.
         borehole = pg.meshtools.createCylinder(
             radius=self.borehole_diameter / 2.0,
-            height=self.borehole_length + 0.2,
+            height=self.borehole_length + 0.1,
             pos=[0.0, 0.0, -self.borehole_length / 2.0],
             marker=1,
             area=self.borehole_area

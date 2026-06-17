@@ -59,7 +59,10 @@ class Geometry:
 
     def make_basic_geometry(self, vtk_filename: str = "plc.vtk") -> pg.core.Mesh:
         """
-        Create a basic 3D geometry representation of the borehole and layered domain.
+        Create a basic 3D Piecewise Linear Complex (PLC) geometry representation of the borehole and layered domain.
+        
+        Args:
+            vtk_filename (str, optional): The filename for exporting the geometry to VTK format. Defaults to 'plc.vtk'.
         """
         if self.layer_1d_geometry is None or len(self.layer_1d_geometry) == 0:
             raise ValueError("layer_1d_geometry must be defined to create the geometry.")
@@ -118,10 +121,8 @@ class Geometry:
             elif m.marker() == 1:
                 m.setArea(self.borehole_area)
 
-
-        #pg.show(geom)
-
         geom.exportVTK('before_boundaries.vtk')
+        
         # Set strict boundary conditions for ERT and avoid conflicts with region markers.
         # createCube assigns boundary markers 1-6 which conflict with our region markers 1, 2, 3...
         for bound in geom.boundaries():
@@ -137,7 +138,7 @@ class Geometry:
             else:
                 # Internal boundaries should be 0 so they are not treated as Dirichlet BCs
                 bound.setMarker(0)
-        #pg.show(geom)
+                
         if vtk_filename:
             geom.exportVTK(vtk_filename)
 
@@ -233,10 +234,10 @@ class Geometry:
             vtk_filename (str, optional): The filename for exporting the mesh to VTK format. Defaults to 'mesh.vtk'.
             quality (float, optional): The mesh quality parameter (higher means finer/more regular elements). Defaults to 34.2.
         """
-        # Generate the mesh (omit global area constraint to respect region areas)
+        # Generate the mesh (omitting global area constraint to respect detailed region area targets)
         mesh = pg.meshtools.createMesh(geom, quality=quality)
 
-        # 4. Paint the layers onto the soil cells
+        # Paint the 1D layers onto both the inner core and outer world cells
         for cell in mesh.cells():
             z_center = cell.center()[2]
             if cell.marker() in [2, 100]:  # Update both inner core and outer world cells to form true 1D layers
@@ -253,7 +254,7 @@ class Geometry:
                         cell.setMarker(i + 2)
                         break
 
-        # 5. Create rhomap according to PyGIMLi tutorial standard
+        # Create a rhomap defining marker-to-resistivity relationships
         # A list of [marker, resistivity] pairs. Marker 1 (Borehole) defaults to background_resistivity.
         rhomap = [[1, self.background_resistivity]]
         
@@ -270,7 +271,7 @@ class Geometry:
 
         if vtk_filename:
             mesh.exportVTK(vtk_filename)
-            mesh.save("mesh.bms")  # Save the mesh in binary format for future use
+            mesh.save("mesh.bms")
         
         return mesh
 
@@ -340,26 +341,9 @@ class Geometry:
         rhomap_dict = dict(self.rhomap)
         res_list = [rhomap_dict.get(cell.marker(), self.background_resistivity) for cell in mesh.cells()]
         
-        # Assign to mesh for VTK visualization
-        #mesh["Resistivity"] = np.array(res_list)
-        
         # Convert explicitly to pyGIMLi Vector to prevent internal region mapping crashes
         res_vec = pg.Vector(res_list)
         print(self.rhomap)
-        #pg.show(mesh,data=self.rhomap,cMap="jet",label="Resistivity [Ohm.m]",logScale=True,sliceBy='x')
-        #pl = pv.Plotter()
-        # 2. Add your slice along the x-axis
-        #drawSlice(
-        #    pl, 
-        #    mesh, 
-        #    normal=[1, 0, 0],   # Normal vector pointing along x-axis creates a Y-Z cutting plane
-        #    origin=[0, 0, 0], # The exact X coordinate where you want to slice
-        #    data=np.array(res_list), 
-        #    cMap="jet", 
-        #    label="Resistivity [Ohm.m]", 
-        #    logScale=True
-        #)
-        #pl.show() 
         
         print("Simulating ERT data...")
         sim_data = ert.simulate(
@@ -417,8 +401,6 @@ class Geometry:
                                          facecolor=cmap(norm(res)), edgecolor='k')
                 ax1.add_patch(rect)
         else:
-            #rect = patches.Rectangle((-width/2, -core_depth), width, core_depth, 
-            #                         facecolor=cmap(norm(self.background_resistivity)), edgecolor='k')
             rect = patches.Rectangle((-width/2, -1.1*self.borehole_length), width, 1.1*self.borehole_length, 
                                      facecolor=cmap(norm(self.background_resistivity)), edgecolor='k')           
             ax1.add_patch(rect)
@@ -434,7 +416,6 @@ class Geometry:
         ax1.add_patch(bh_rect)
         
         ax1.set_xlim(-width/2, width/2)
-        #ax1.set_ylim(-core_depth, 0)
         ax1.set_ylim(-self.borehole_length * 1.05, 0)
         ax1.set_xlabel("x (m)")
         ax1.set_ylabel("Depth (m)")
@@ -510,7 +491,6 @@ if __name__ == "__main__":
     # Run the forward simulation
     simulated_data = geometry.run(mesh, data)
     print(f"Forward simulation complete. Simulated data saved to 'simulated_data.dat' with {simulated_data.size()} measurements.")
-    # pg.show(mesh) # Uncomment to visualize using PyGIMLi
 
     # Plot the 2D slice of the 1D model and the depth profiles of the simulated data
     geometry.plot_model_and_data(simulated_data)

@@ -23,12 +23,12 @@ PyBorehole is a Python-based utility designed to define geometries, generate mes
 ### 2D Model Slice & Depth Profile
 Below is the standard dual-view Matplotlib output, displaying a slice of the 1D Layer model highlighting the localized highly conductive borehole. On the right, the apparent resistivity profiles reflect short spacing vs. long spacing protocols measuring through those boundary limits.
 
-!2D Results Profile
+![2D Results Profile](low.png)
 
 ### 3D Resistivity Mesh View
 Below is a visual representation of the highly resolved inner core mesh accurately mapped with distinct resistivity volumes conforming structurally around the borehole interfaces.
 
-!3D Volumetric Mesh View
+![3D Volumetric Mesh View](3d_view_res.png)
 
 ## Installation & Requirements
 

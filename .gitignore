@@ -1,4 +1,6 @@
 # Output data
 simulated_data.dat
+prorocol.dat
+protocol.txt
 *.vtk
 *.bms

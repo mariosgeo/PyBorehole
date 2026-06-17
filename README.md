@@ -33,7 +33,7 @@ Below is a visual representation of the highly resolved inner core mesh accurate
 ### Demo & Usage
 To try out and interact with this package, you can use the demo.ipynb Jupyter Notebook included in this repository.
 
-Note: The demo.ipynb file is currently a work in progress, but it provides a great starting point to see how to configure the geometry, run the mesh generator, and plot the simulated ERT data.
+>Note: The demo.ipynb file is currently a work in progress, but it provides a great starting point to see how to configure the geometry, run the mesh generator, and plot the simulated ERT data.
 
 ## Installation & Requirements
 

@@ -28,7 +28,7 @@ Below is the standard dual-view Matplotlib output, displaying a slice of the 1D 
 ### 3D Resistivity Mesh View
 Below is a visual representation of the highly resolved inner core mesh accurately mapped with distinct resistivity volumes conforming structurally around the borehole interfaces.
 
-![3D Volumetric Mesh View](3d_view_res.png)
+![3D Volumetric Mesh View](3d_VIEW_ZOOM.png)
 
 ## Installation & Requirements
 

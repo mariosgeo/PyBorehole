@@ -1,0 +1,4 @@
+# Output data
+simulated_data.dat
+*.vtk
+*.bms

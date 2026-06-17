@@ -23,23 +23,17 @@ PyBorehole is a Python-based utility designed to define geometries, generate mes
 ### 2D Model Slice & Depth Profile
 Below is the standard dual-view Matplotlib output, displaying a slice of the 1D Layer model highlighting the localized highly conductive borehole. On the right, the apparent resistivity profiles reflect short spacing vs. long spacing protocols measuring through those boundary limits.
 
-![2D Results Profile](low.png)
-!2D Results Profile
+![2D Results Profile](images/low.png)
 
 ### 3D Resistivity Mesh View
 Below is a visual representation of the highly resolved inner core mesh accurately mapped with distinct resistivity volumes conforming structurally around the borehole interfaces.
 
-![3D Volumetric Mesh View](3d_VIEW_ZOOM.png)
-!3D Volumetric Mesh View
+![3D Volumetric Mesh View](images/3d_VIEW_ZOOM.png)
 
-
-### Demo & Usage 
+### Demo & Usage
 To try out and interact with this package, you can use the demo.ipynb Jupyter Notebook included in this repository.
-> Note: The demo.ipynb file is currently a work in progress, but it provides a great starting point to see how to configure the geometry, run the mesh generator, and plot the simulated ERT data.
 
-
-
-
+Note: The demo.ipynb file is currently a work in progress, but it provides a great starting point to see how to configure the geometry, run the mesh generator, and plot the simulated ERT data.
 
 ## Installation & Requirements
 

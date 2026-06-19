@@ -144,19 +144,19 @@ class Geometry:
         
         # Set strict boundary conditions for ERT and avoid conflicts with region markers.
         # createCube assigns boundary markers 1-6 which conflict with our region markers 1, 2, 3...
-        #for bound in geom.boundaries():
-        #    center = bound.center()
-        #    # Top surface must be -1 (Free surface / Neumann)
-        #    if np.isclose(center[2], 0.0, atol=1e-3):
-        #        bound.setMarker(int(BoundaryMarkers.NEUMANN))
-        #    # Outer walls and bottom must be -2 (Mixed / Robin boundary)
-        #    elif (np.isclose(abs(center[0]), wx_dim / 2.0, atol=1e-3) or
-        #          np.isclose(abs(center[1]), wy_dim / 2.0, atol=1e-3) or
-        #          np.isclose(center[2], -world_depth, atol=1e-3)):
-        #        bound.setMarker(int(BoundaryMarkers.ROBIN))
-        #    else:
-        #        # Internal boundaries should be 0 so they are not treated as Dirichlet BCs
-        #        bound.setMarker(int(BoundaryMarkers.INTERNAL))
+        for bound in geom.boundaries():
+            center = bound.center()
+            # Top surface must be -1 (Free surface / Neumann)
+            if np.isclose(center[2], 0.0, atol=1e-3):
+                bound.setMarker(int(BoundaryMarkers.NEUMANN))
+            # Outer walls and bottom must be -2 (Mixed / Robin boundary)
+            elif (np.isclose(abs(center[0]), wx_dim / 2.0, atol=1e-3) or
+                  np.isclose(abs(center[1]), wy_dim / 2.0, atol=1e-3) or
+                  np.isclose(center[2], -world_depth, atol=1e-3)):
+                bound.setMarker(int(BoundaryMarkers.ROBIN))
+            else:
+                # Internal boundaries should be 0 so they are not treated as Dirichlet BCs
+                bound.setMarker(int(BoundaryMarkers.INTERNAL))
                 
         if vtk_filename:
             geom.exportVTK(vtk_filename)
@@ -419,10 +419,21 @@ class Geometry:
                 rect = patches.Rectangle((-width/2, -bottom), width, bottom - top, 
                                          facecolor=cmap(norm(res)), edgecolor='k')
                 ax1.add_patch(rect)
+                
+                # Annotate layer resistivity value on the left side (avoiding the central borehole)
+                y_center_layer = -(top + bottom) / 2.0
+                ax1.text(-width * 0.3, y_center_layer, f"{res:.1f} $\\Omega\\cdot$m", 
+                         color='black', ha='center', va='center',
+                         bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
         else:
             rect = patches.Rectangle((-width/2, -1.1*self.borehole_length), width, 1.1*self.borehole_length, 
                                      facecolor=cmap(norm(self.background_resistivity)), edgecolor='k')           
             ax1.add_patch(rect)
+            
+            # Annotate background resistivity value
+            ax1.text(-width * 0.3, -1.1*self.borehole_length / 2.0, f"{self.background_resistivity:.1f} $\\Omega\\cdot$m",
+                     color='black', ha='center', va='center',
+                     bbox=dict(facecolor='white', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
             
         # Draw borehole rectangle in the center
         bh_res = self.background_resistivity
@@ -469,6 +480,20 @@ class Geometry:
         if len(unique_a) > 1:
             mask_long = (a_spacings == unique_a[-1])
             ax2.plot(rho_a[mask_long], z_center[mask_long], 's-', label=f"Long (a={unique_a[-1]}m)", color='red')
+            
+        # Draw true 1D resistivity profile as a step-wise line
+        if self.layer_1d_geometry is not None:
+            true_z = []
+            true_res = []
+            for i, row in enumerate(self.layer_1d_geometry):
+                top, bottom, res = float(row[0]), float(row[1]), float(row[2])
+                if i == len(self.layer_1d_geometry) - 1:
+                    bottom = max(bottom, 1.1*self.borehole_length)
+                true_z.extend([-top, -bottom])
+                true_res.extend([res, res])
+            ax2.plot(true_res, true_z, '--', color='black', label="True 1D Model", linewidth=2)
+        else:
+            ax2.axvline(x=self.background_resistivity, color='black', linestyle='--', label="True 1D Model", linewidth=2)
             
         ax2.set_xlabel("Apparent Resistivity ($\Omega \cdot$m)")
         ax2.set_title("Apparent Resistivity vs Depth")

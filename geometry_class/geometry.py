@@ -1,5 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
+from typing import Optional, List, Tuple
+from enum import IntEnum
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.colors as mcolors
@@ -10,30 +12,42 @@ import warnings
 import pyvista as pv
 from pygimli.viewer.pv import drawSlice
 
+class RegionMarkers(IntEnum):
+    """Markers for geometric regions."""
+    BOREHOLE = 1
+    CORE = 2
+    WORLD = 100
+
+class BoundaryMarkers(IntEnum):
+    """Markers for boundary conditions."""
+    NEUMANN = -1  # Free surface (top)
+    ROBIN = -2    # Mixed/Robin boundary (far-field)
+    INTERNAL = 0  # Internal boundary
+
 @dataclass
 class Geometry:
     """
-    A utility class for performing common geometric calculations.
+    A data class to define geometry, create meshes, and run ERT simulations for borehole environments.
 
     Attributes:
         borehole_length (float): The total depth/length of the borehole.
         borehole_diameter (float): The diameter of the borehole.
-        layer_1d_geometry (np.ndarray, optional): A 2D array defining the layered soil geometry, typically [top_depth, bottom_depth, resistivity] for each layer.
-        background_resistivity (float, optional): The default resistivity applied to the background/unspecified areas. Defaults to 5.0.
-        rhomap (list, optional): A list of [marker, resistivity] pairs generated after geometry creation to map regions to resistivity.
-        area_xy (tuple, optional): The (x, y) dimensions of the inner core modeling domain. Defaults to (10.0, 10.0).
-        world_xy (tuple, optional): The (x, y) dimensions of the outer boundary domain. Defaults to (50.0, 50.0).
-        world_area (float, optional): The maximum area/volume constraint for tetrahedra in the outer domain. Defaults to 0.0 (unconstrained).
-        core_area (float, optional): The maximum area/volume constraint for tetrahedra in the core domain. Defaults to None (calculated from borehole_diameter).
-        borehole_area (float, optional): The maximum area/volume constraint for tetrahedra in the borehole. Defaults to None (calculated from core_area).
+        layer_1d_geometry (Optional[np.ndarray]): 2D array defining layered soil: [top_depth, bottom_depth, resistivity].
+        background_resistivity (float): Resistivity for unspecified areas. Defaults to 5.0.
+        rhomap (Optional[List[List[float]]]): List of [marker, resistivity] pairs.
+        area_xy (Tuple[float, float]): (x, y) dimensions of the inner core modeling domain. Defaults to (20.0, 20.0).
+        world_xy (Tuple[float, float]): (x, y) dimensions of the outer boundary domain. Defaults to (100.0, 100.0).
+        world_area (float): Max area/volume for tetrahedra in the outer domain. Defaults to 0.0 (unconstrained).
+        core_area (Optional[float]): Max area/volume for tetrahedra in the core domain.
+        borehole_area (Optional[float]): Max area/volume for tetrahedra in the borehole.
     """
     borehole_length: float 
     borehole_diameter: float
-    layer_1d_geometry: np.ndarray = None
+    layer_1d_geometry: Optional[np.ndarray] = None
     background_resistivity: float = 5.0
-    rhomap: list = None
-    area_xy: tuple = (20.0, 20.0)
-    world_xy: tuple = (100.0, 100.0)
+    rhomap: Optional[List[List[float]]] = None
+    area_xy: Tuple[float, float] = (20.0, 20.0)
+    world_xy: Tuple[float, float] = (100.0, 100.0)
     world_area: float = 0.0
     core_area: float = None
     borehole_area: float = None
@@ -78,66 +92,71 @@ class Geometry:
         world = pg.meshtools.createCube(
             size=[wx_dim, wy_dim, world_depth],
             pos=[0.0, 0.0, -world_depth / 2.0],
-            marker=100,
+            marker=int(RegionMarkers.WORLD),
             area=self.world_area
         )
         
+        # Explicitly set the region marker's position to be inside the world
+        # but outside the core. This is crucial for correct region identification.
         for m in world.regionMarkers():
-            m.setPos([wx_dim / 2.0 - 0.1, 0.011, -world_depth / 2.0 + 0.0123])
+            m.setPos([(wx_dim + x_dim) / 4.0, 0.0, -world_depth / 4.0])
 
         # 2. Create the inner core block for fine resolution
         core = pg.meshtools.createCube(
             size=[x_dim, y_dim, core_depth],
             pos=[0.0, 0.0, -core_depth / 2.0],
-            marker=2,
+            marker=int(RegionMarkers.CORE),
             area=self.core_area
         )
         
+        # Explicitly set the region marker's position to be inside the core
+        # but outside the borehole.
         for m in core.regionMarkers():
-            m.setPos([x_dim / 2.0 - 0.1, 0.011, -core_depth / 2.0 + 0.0123])
+            m.setPos([(x_dim / 2.0 + self.borehole_diameter / 2.0) / 2.0, 0.0, -core_depth / 4.0])
 
         # 3. Create the borehole cylinder
         borehole = pg.meshtools.createCylinder(
             radius=self.borehole_diameter / 2.0,
             height=self.borehole_length,
             pos=[0.0, 0.0, -self.borehole_length / 2.0],
-            marker=1,
+            marker=int(RegionMarkers.BOREHOLE),
             area=self.borehole_area
         )
         
         for m in borehole.regionMarkers():
-            m.setPos([0.007, 0.011, -self.borehole_length / 2.0 + 0.0123])
-            
+            # The default center position is fine for the innermost geometry,
+            # but we can set it explicitly for clarity.
+            m.setPos([0.0, 0.0, -self.borehole_length / 4.0])
 
         geom = world + core + borehole
 
         # In PyGIMLi, combining geometries with '+' can discard the area constraints 
         # on the region markers. We re-apply them directly to the final PLC markers.
         for m in geom.regionMarkers():
-            if m.marker() == 100:
+            if m.marker() == RegionMarkers.WORLD:
                 m.setArea(self.world_area)
-            elif m.marker() == 2:
+            elif m.marker() == RegionMarkers.CORE:
                 m.setArea(self.core_area)
-            elif m.marker() == 1:
+            elif m.marker() == RegionMarkers.BOREHOLE:
                 m.setArea(self.borehole_area)
 
         geom.exportVTK('before_boundaries.vtk')
         
         # Set strict boundary conditions for ERT and avoid conflicts with region markers.
         # createCube assigns boundary markers 1-6 which conflict with our region markers 1, 2, 3...
-        for bound in geom.boundaries():
-            center = bound.center()
-            # Top surface must be -1 (Free surface / Neumann)
-            if np.isclose(center[2], 0.0, atol=1e-3):
-                bound.setMarker(-1)
-            # Outer walls and bottom must be -2 (Mixed / Robin boundary)
-            elif (np.isclose(abs(center[0]), wx_dim / 2.0, atol=1e-3) or
-                  np.isclose(abs(center[1]), wy_dim / 2.0, atol=1e-3) or
-                  np.isclose(center[2], -world_depth, atol=1e-3)):
-                bound.setMarker(-2)
-            else:
-                # Internal boundaries should be 0 so they are not treated as Dirichlet BCs
-                bound.setMarker(0)
+        #for bound in geom.boundaries():
+        #    center = bound.center()
+        #    # Top surface must be -1 (Free surface / Neumann)
+        #    if np.isclose(center[2], 0.0, atol=1e-3):
+        #        bound.setMarker(int(BoundaryMarkers.NEUMANN))
+        #    # Outer walls and bottom must be -2 (Mixed / Robin boundary)
+        #    elif (np.isclose(abs(center[0]), wx_dim / 2.0, atol=1e-3) or
+        #          np.isclose(abs(center[1]), wy_dim / 2.0, atol=1e-3) or
+        #          np.isclose(center[2], -world_depth, atol=1e-3)):
+        #        bound.setMarker(int(BoundaryMarkers.ROBIN))
+        #    else:
+        #        # Internal boundaries should be 0 so they are not treated as Dirichlet BCs
+        #        bound.setMarker(int(BoundaryMarkers.INTERNAL))
                 
         if vtk_filename:
             geom.exportVTK(vtk_filename)
@@ -236,11 +255,11 @@ class Geometry:
         """
         # Generate the mesh (omitting global area constraint to respect detailed region area targets)
         mesh = pg.meshtools.createMesh(geom, quality=quality)
-
+        mesh.save("mesh_before_bc.bms")
         # Paint the 1D layers onto both the inner core and outer world cells
         for cell in mesh.cells():
             z_center = cell.center()[2]
-            if cell.marker() in [2, 100]:  # Update both inner core and outer world cells to form true 1D layers
+            if cell.marker() in [RegionMarkers.CORE, RegionMarkers.WORLD]:  # Update both inner core and outer world cells
                 for i, row in enumerate(self.layer_1d_geometry):
                     depth_top = float(row[0])
                     depth_bottom = float(row[1])
@@ -250,12 +269,12 @@ class Geometry:
                     z_top = -depth_top
                     z_bottom = -depth_bottom
                     
-                    if z_bottom - 0.1 <= z_center <= z_top + 0.1:
+                    if z_bottom < z_center <= z_top:
                         cell.setMarker(i + 2)
                         break
 
         # Create a rhomap defining marker-to-resistivity relationships
-        # A list of [marker, resistivity] pairs. Marker 1 (Borehole) defaults to background_resistivity.
+        # Marker 1 (Borehole) defaults to background_resistivity.
         rhomap = [[1, self.background_resistivity]]
         
         for i, row in enumerate(self.layer_1d_geometry):
@@ -315,7 +334,7 @@ class Geometry:
         pl.add_axes()
         pl.add_title("Mesh Boundary Conditions")
         pl.show()
-
+    
     def run(self, mesh: pg.core.Mesh, data: pg.DataContainerERT, rhomap: list = None, output_filename: str = "simulated_data.dat", noise_level: float = 0.0, noise_abs: float = 0.0) -> pg.DataContainerERT:
         """
         Run the ERT forward model using the generated mesh and data protocol.
@@ -323,7 +342,7 @@ class Geometry:
         Args:
             mesh (pg.core.Mesh): The generated mesh.
             data (pg.DataContainerERT): The measurement protocol.
-            rhomap (list, optional): Custom rhomap. If provided, it updates the class instance's rhomap. Defaults to None.
+            rhomap (Optional[List[List[float]]]): Custom rhomap. If provided, it updates the instance's rhomap.
             output_filename (str, optional): The filename for exporting the simulated data. Defaults to 'simulated_data.dat'.
             noise_level (float, optional): Relative noise level to add to the data (e.g. 0.05 for 5%). Defaults to 0.0.
             noise_abs (float, optional): Absolute noise level in Ohms. Defaults to 0.0.

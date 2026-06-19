@@ -4,3 +4,4 @@ protocol.dat
 protocol.txt
 *.vtk
 *.bms
+*.zip

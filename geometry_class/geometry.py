@@ -495,10 +495,11 @@ class Geometry:
         else:
             ax2.axvline(x=self.background_resistivity, color='black', linestyle='--', label="True 1D Model", linewidth=2)
             
+        ax2.set_xscale('log')
         ax2.set_xlabel("Apparent Resistivity ($\Omega \cdot$m)")
         ax2.set_title("Apparent Resistivity vs Depth")
         ax2.legend()
-        ax2.grid(True, linestyle='--', alpha=0.7)
+        ax2.grid(True, which='both', linestyle='--', alpha=0.7)
         
         plt.tight_layout()
         plt.show()

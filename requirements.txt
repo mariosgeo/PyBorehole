@@ -2,3 +2,6 @@ numpy
 matplotlib
 pygimli
 pyvista
+simpeg
+discretize
+pandas

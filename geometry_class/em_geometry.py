@@ -118,9 +118,13 @@ class EMGeometry:
         If ``False`` (default) the receiver is placed *below* the transmitter
         (deeper in borehole).  Set ``True`` to reverse.
     core_cell_size : float, optional
-        Edge length (m) of the uniform fine cells in the mesh core region
-        around the borehole.  Should be ≤ skin-depth / 5 at the highest
-        frequency in the most conductive layer.  Defaults to 0.1 m.
+        Edge length (m) of the uniform fine cells in the radial (r) direction.
+        The z-direction core cell size is auto-computed as
+        ``max(core_cell_size, min(coil_spacings) / 5)`` — relaxed to save
+        cells when the user-supplied value is finer than accuracy requires
+        (≥ 5 cells per smallest coil spacing).
+        Should be ≤ skin-depth / 5 at the highest frequency in the most
+        conductive layer.  Defaults to 0.05 m.
     n_padding : int, optional
         Number of geometric-expansion padding cells on each boundary side.
         Defaults to 10.
@@ -284,48 +288,48 @@ class EMGeometry:
                 "discretize is required.  Install with: pip install discretize"
             )
 
-        cs   = self.core_cell_size
         pfac = self.pad_factor
 
-        # ── Radial (r) ────────────────────────────────────────────────────────
-        # Fine cells: axis → 3× largest coil spacing (resolves the TX-RX geometry)
-        r_fine = max(3.0 * max(self.coil_spacings), self.borehole_diameter * 10.0)
-        n_fine_r = max(5, int(np.ceil(r_fine / cs)))
+        # ── Radial (r) — fine for dipole source resolution ──────────────────
+        cs_r = self.core_cell_size
+        # Fine cells: axis → 2× largest coil spacing (resolves TX-RX near-field)
+        r_fine = max(2.0 * max(self.coil_spacings), self.borehole_diameter * 10.0)
+        n_fine_r = max(5, int(np.ceil(r_fine / cs_r)))
         # Geometric padding: r_fine → domain_radius
-        npad_r = self._n_pad_cells(r_fine, self.domain_radius, cs, pfac)
-        hr = [(cs, n_fine_r), (cs, npad_r, pfac)]
+        npad_r = self._n_pad_cells(r_fine, self.domain_radius, cs_r, pfac)
+        hr = [(cs_r, n_fine_r), (cs_r, npad_r, pfac)]
 
-        # ── Azimuthal (theta) ─────────────────────────────────────────────────
+        # ── Azimuthal (theta) ────────────────────────────────────────────────
         n_th = max(1, self.n_theta_cells)
         if n_th == 1:
-            h_theta = [2.0 * np.pi]          # single cell covers full circle
+            h_theta = [2.0 * np.pi]       # single cell covers full circle
         else:
             dtheta = 2.0 * np.pi / n_th
-            h_theta = [dtheta] * n_th        # uniform azimuthal cells
+            h_theta = [dtheta] * n_th     # uniform azimuthal cells
 
-        # ── Vertical (z) ──────────────────────────────────────────────────────
-        # Fine core: covers borehole column (z = -borehole_length to 0)
-        n_core_z = int(np.ceil(self.borehole_length / cs)) + 1
-        n_above  = max(3, self.n_padding // 3)  # a few cells above z=0
-        # Geometric padding below (borehole bottom → -domain_radius)
-        npad_z_below = self._n_pad_cells(0.0, self.domain_radius, cs, pfac)
-        # Geometric padding above (n_above cells → +domain_radius above surface)
-        npad_z_above = self._n_pad_cells(n_above * cs, self.domain_radius, cs, pfac)
+        # ── Vertical (z) — auto-optimised cell size ──────────────────────────
+        # Accuracy requirement: ≥ 5 cells within the smallest coil spacing.
+        # If core_cell_size is finer than required, relax it to save cells.
+        cs_z_min = min(self.coil_spacings) / 5.0
+        cs_z = max(self.core_cell_size, cs_z_min)
+
+        n_core_z    = int(np.ceil(self.borehole_length / cs_z)) + 1
+        n_above     = max(2, self.n_padding // 4)   # 2–3 cells above z=0 is enough
+        npad_z_below = self._n_pad_cells(0.0, self.domain_radius, cs_z, pfac)
+        npad_z_above = self._n_pad_cells(n_above * cs_z, self.domain_radius, cs_z, pfac)
 
         hz = [
-            (cs, npad_z_below, -pfac),  # below borehole — expanding downward
-            (cs, n_core_z),             # fine borehole column
-            (cs, n_above),              # a few uniform cells above surface
-            (cs, npad_z_above, pfac),   # above surface — expanding upward
+            (cs_z, npad_z_below, -pfac),  # below borehole — expanding downward
+            (cs_z, n_core_z),             # fine borehole column
+            (cs_z, n_above),              # a few uniform cells above surface
+            (cs_z, npad_z_above, pfac),   # above surface — expanding upward
         ]
 
-        # ── Origin ───────────────────────────────────────────────────────────
-        # r always starts at 0 in CylindricalMesh (axis)
-        # theta always starts at 0
-        # z0: set so that TOP of the fine borehole column = 0 (surface)
-        #   z0 + sum_pad_below + n_core_z·cs = 0
-        sum_pad_below = cs * (pfac**npad_z_below - 1.0) / (pfac - 1.0)
-        z0 = -(sum_pad_below + n_core_z * cs)
+        # ── Origin ──────────────────────────────────────────────────────────
+        # r starts at 0 (axis); theta starts at 0.
+        # z0: top of the fine borehole column aligns with z=0 (surface).
+        sum_pad_below = cs_z * (pfac**npad_z_below - 1.0) / (pfac - 1.0)
+        z0 = -(sum_pad_below + n_core_z * cs_z)
 
         mesh = _discretize.CylindricalMesh([hr, h_theta, hz], origin=[0.0, 0.0, z0])
         return mesh
@@ -587,6 +591,9 @@ class EMGeometry:
                             "imag":      h_imag,
                             "amplitude": float(np.sqrt(h_real**2 + h_imag**2)),
                             "phase":     float(np.degrees(np.arctan2(h_imag, h_real))),
+                            "apparent_resistivity": self._lin_apparent_resistivity(
+                                h_imag, spacing, freq
+                            ),
                         }
                     )
 
@@ -594,6 +601,60 @@ class EMGeometry:
             print(f"  Parsed {len(records)} data points into DataFrame.")
 
         return pd.DataFrame(records)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _lin_apparent_resistivity(self, h_imag: float, spacing: float, freq: float) -> float:
+        """
+        Low-Induction-Number (LIN) apparent resistivity for borehole EM.
+
+        Valid when the skin depth >> coil spacing.
+        Returns NaN if the formula is not applicable.
+
+        Sign convention
+        ---------------
+        SimPEG uses the ``e^{-iomega*t}`` time convention:
+          Im(H_sec) < 0  for a conductive earth (LIN regime).
+        We negate h_imag internally so the sign matches McNeill (1980),
+        which uses e^{+iomega*t} where Im > 0 for conductive earth.
+
+        Geometry (full-space borehole)
+        --------------------------------
+        McNeill's original coefficients (k=8pi VMD, k=16pi HMD) are for a
+        surface dipole above a half-space.  In a borehole the tool is
+        surrounded by medium on all sides (full-space), so the quadrature
+        response is 2x larger for the same sigma, and k is halved:
+
+          VMD (orientation='z'):    k = 4*pi  (H_primary = 1 / (2*pi*s^3))
+          HMD (orientation='x/y'):  k = 8*pi  (H_primary = 1 / (4*pi*s^3))
+
+          sigma_a = (k * s) / (mu0 * omega) * (-h_imag)
+          rho_a   = 1 / sigma_a
+
+        Parameters
+        ----------
+        h_imag : float
+            Imaginary part of secondary H-field (A/m) in SimPEG convention
+            (typically negative for a conductive earth).
+        spacing : float
+            Coil spacing (m).
+        freq : float
+            Operating frequency (Hz).
+
+        Returns
+        -------
+        float
+            Apparent resistivity (Ohm.m), or NaN if undefined.
+        """
+        # Negate: SimPEG e^{-iwt} gives Im(H_sec) < 0 for conductive earth
+        q = -h_imag
+        if q <= 0.0:
+            return float("nan")
+        MU0   = 4.0 * np.pi * 1e-7
+        omega = 2.0 * np.pi * freq
+        # Full-space borehole coefficients (half of McNeill's surface values)
+        k = 4.0 * np.pi if self.coil_orientation == "z" else 8.0 * np.pi
+        sigma_a = (k * spacing) / (MU0 * omega) * q
+        return float(1.0 / sigma_a)
 
     # ──────────────────────────────────────────────────────────────────────────
     def plot_mesh_slice(
@@ -684,8 +745,8 @@ class EMGeometry:
     def plot_log(
         self,
         result: pd.DataFrame,
-        quantity: str = "amplitude",
-        log_scale: bool = False,
+        quantity: str = "apparent_resistivity",
+        log_scale: Optional[bool] = None,
         figsize: Optional[Tuple[float, float]] = None,
     ) -> plt.Figure:
         """
@@ -700,10 +761,18 @@ class EMGeometry:
         result : pd.DataFrame
             Output of :meth:`run`.
         quantity : str, optional
-            Column to plot: ``'amplitude'``, ``'phase'``, ``'real'``, or
-            ``'imag'``.  Defaults to ``'amplitude'``.
-        log_scale : bool, optional
-            Logarithmic x-axis.  Useful for amplitude.  Defaults to ``False``.
+            Column to plot.  Choices:
+
+            * ``'apparent_resistivity'`` (default) — LIN apparent resistivity
+              in Ohm.m; log x-axis applied automatically.
+            * ``'amplitude'`` — |H_secondary| in A/m.
+            * ``'phase'`` — phase angle in degrees.
+            * ``'real'`` / ``'imag'`` — H-field components in A/m.
+
+        log_scale : bool or None, optional
+            Force logarithmic x-axis (``True``/``False``).
+            If ``None`` (default), log scale is applied automatically for
+            ``'apparent_resistivity'`` and ``'amplitude'``.
         figsize : tuple, optional
             Figure size.  Auto-sized if ``None``.
 
@@ -711,9 +780,13 @@ class EMGeometry:
         -------
         matplotlib.figure.Figure
         """
-        _valid = ("amplitude", "phase", "real", "imag")
+        _valid = ("apparent_resistivity", "amplitude", "phase", "real", "imag")
         if quantity not in _valid:
             raise ValueError(f"quantity must be one of {_valid}.")
+
+        # Auto log-scale: on for resistivity and amplitude, off for phase/field
+        if log_scale is None:
+            log_scale = quantity in ("apparent_resistivity", "amplitude")
 
         combos  = result.groupby(["spacing", "frequency"], sort=True)
         n_combos = len(combos)
@@ -743,17 +816,35 @@ class EMGeometry:
                 )
 
         _units = {
+            "apparent_resistivity": "Ohm.m",
             "amplitude": "A/m",
             "real":      "A/m (real)",
             "imag":      "A/m (imag)",
             "phase":     "degrees",
         }
-        ax.set_xlabel(f"{quantity.capitalize()} [{_units[quantity]}]")
+        _labels = {
+            "apparent_resistivity": "Apparent Resistivity",
+            "amplitude": "Amplitude",
+            "real":  "Real Component",
+            "imag":  "Imaginary Component",
+            "phase": "Phase",
+        }
+        xlabel = f"{_labels.get(quantity, quantity)} [{_units.get(quantity, '')}]"
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("Depth (m)")
-        ax.set_title(f"EM Borehole Log — {quantity.capitalize()}")
+        ax.set_title(f"EM Borehole Log  |  {_labels.get(quantity, quantity)}")
         ax.set_ylim(-self.borehole_length * 1.02, 0.0)
         if log_scale:
-            ax.set_xscale("log")
+            _col_vals = result[quantity].replace([np.inf, -np.inf], np.nan).dropna()
+            if (_col_vals > 0).any():
+                ax.set_xscale("log")
+            else:
+                # No positive finite values — log scale not possible; keep linear
+                warnings.warn(
+                    f"Cannot apply log scale for quantity={quantity!r}: "
+                    "no finite positive values in the data. Using linear scale.",
+                    stacklevel=2,
+                )
         ax.invert_yaxis()
         ax.legend(fontsize=8, loc="lower right")
         ax.grid(True, linestyle="--", alpha=0.5)
@@ -764,8 +855,8 @@ class EMGeometry:
     def plot_model_and_log(
         self,
         result: pd.DataFrame,
-        quantity: str = "amplitude",
-        log_scale: bool = False,
+        quantity: str = "apparent_resistivity",
+        log_scale: Optional[bool] = None,
     ) -> plt.Figure:
         """
         Side-by-side plot: 1-D resistivity model cross-section and EM log(s).
@@ -775,14 +866,19 @@ class EMGeometry:
         result : pd.DataFrame
             Output of :meth:`run`.
         quantity : str, optional
-            Column to plot on the log panel.  See :meth:`plot_log`.
-        log_scale : bool, optional
-            Logarithmic x-axis for the log panel.  Defaults to ``False``.
+            Column to plot on the log panel.  Choices are the same as in
+            :meth:`plot_log`.  Defaults to ``'apparent_resistivity'``.
+        log_scale : bool or None, optional
+            Force logarithmic x-axis.  If ``None`` (default), applied
+            automatically for ``'apparent_resistivity'`` and ``'amplitude'``.
 
         Returns
         -------
         matplotlib.figure.Figure
         """
+        # Auto log-scale
+        if log_scale is None:
+            log_scale = quantity in ("apparent_resistivity", "amplitude")
         bh_total = self.borehole_length
         fig, (ax_model, ax_log) = plt.subplots(
             1, 2,
@@ -881,15 +977,32 @@ class EMGeometry:
                 )
 
         _units = {
+            "apparent_resistivity": "Ohm.m",
             "amplitude": "A/m",
             "real":      "A/m (real)",
             "imag":      "A/m (imag)",
             "phase":     "degrees",
         }
-        ax_log.set_xlabel(f"{quantity.capitalize()} [{_units.get(quantity, '')}]")
-        ax_log.set_title(f"EM Log — {quantity.capitalize()}")
+        _labels = {
+            "apparent_resistivity": "Apparent Resistivity",
+            "amplitude": "Amplitude",
+            "real":  "Real Component",
+            "imag":  "Imaginary Component",
+            "phase": "Phase",
+        }
+        xlabel = f"{_labels.get(quantity, quantity)} [{_units.get(quantity, '')}]"
+        ax_log.set_xlabel(xlabel)
+        ax_log.set_title(f"EM Log  |  {_labels.get(quantity, quantity)}")
         if log_scale:
-            ax_log.set_xscale("log")
+            _col_vals = result[quantity].replace([np.inf, -np.inf], np.nan).dropna()
+            if (_col_vals > 0).any():
+                ax_log.set_xscale("log")
+            else:
+                warnings.warn(
+                    f"Cannot apply log scale for quantity={quantity!r}: "
+                    "no finite positive values in the data. Using linear scale.",
+                    stacklevel=2,
+                )
         ax_log.invert_yaxis()
         ax_log.legend(fontsize=8, loc="lower right")
         ax_log.grid(True, linestyle="--", alpha=0.5)
@@ -938,7 +1051,7 @@ if __name__ == "__main__":
 
     print("\n=== Running 3D FDEM simulation ===")
     result = em.run()
-    print(result.head(10))
+    print(result[["depth","spacing","frequency","apparent_resistivity","amplitude","phase"]].head(10))
 
-    fig = em.plot_model_and_log(result, quantity="amplitude")
+    fig = em.plot_model_and_log(result)   # defaults to apparent_resistivity
     plt.show()

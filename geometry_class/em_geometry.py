@@ -143,6 +143,17 @@ class EMGeometry:
         * ``≥ 8`` — recommended for HMD (``coil_orientation='x'`` or ``'y'``);
           increases cell count by ``n_theta_cells`` but is still far smaller
           than a full TensorMesh.
+    mesh_type : str, optional
+        Which mesh to use for the 3-D FDEM solve:
+
+        * ``'cylindrical'`` (default) — :class:`discretize.CylindricalMesh`.
+          Axisymmetric; one LU factorisation per frequency covers every tool
+          depth simultaneously.  Best for VMD surveys with many depth positions.
+        * ``'tree'`` — :class:`discretize.TreeMesh` (OcTree).
+          Each tool depth is simulated independently with a *local* mesh
+          centred around that position, so the mesh is much smaller than a
+          full-borehole model.  Requires one LU factorisation per depth per
+          frequency but handles HMD accurately without extra theta cells.
 
     Attributes
     ----------
@@ -162,7 +173,8 @@ class EMGeometry:
     measuring_spacing: float = 0.1
     receiver_above: bool = False
 
-    # ── 3-D mesh control (CylindricalMesh) ────────────────────────────────────
+    # ── 3-D mesh control ───────────────────────────────────────────────────────
+    mesh_type: str = "cylindrical"     # 'cylindrical' or 'tree'
     core_cell_size: float = 0.05
     n_padding: int = 10
     pad_factor: float = 1.4
@@ -195,13 +207,22 @@ class EMGeometry:
                     stacklevel=2,
                 )
 
-        # ── HMD + single theta cell advisory ─────────────────────────────────
-        if self.coil_orientation in ("x", "y") and self.n_theta_cells < 3:
+        # ── mesh_type validation ──────────────────────────────────────────────
+        self.mesh_type = self.mesh_type.lower()
+        if self.mesh_type not in ("cylindrical", "tree"):
+            raise ValueError("mesh_type must be 'cylindrical' or 'tree'.")
+
+        # ── HMD + single theta cell advisory (cylindrical only) ───────────────
+        if (
+            self.coil_orientation in ("x", "y")
+            and self.n_theta_cells < 3
+            and self.mesh_type == "cylindrical"
+        ):
             warnings.warn(
                 f"HMD orientation (coil_orientation='{self.coil_orientation}') with "
                 f"n_theta_cells={self.n_theta_cells} is not azimuthally symmetric. "
                 "Results will be approximate. Consider n_theta_cells >= 8 for "
-                "accurate HMD simulation.",
+                "accurate HMD simulation, or switch to mesh_type='tree'.",
                 stacklevel=2,
             )
 
@@ -328,7 +349,10 @@ class EMGeometry:
         # ── Origin ──────────────────────────────────────────────────────────
         # r starts at 0 (axis); theta starts at 0.
         # z0: top of the fine borehole column aligns with z=0 (surface).
-        sum_pad_below = cs_z * (pfac**npad_z_below - 1.0) / (pfac - 1.0)
+        # Discretize's (cs, n, -f) format generates widths [cs·f^n, cs·f^(n-1), …, cs·f]
+        # (the minimum cell adjacent to the fine region has width cs·f, not cs).
+        # Correct geometric sum = cs · f · (f^n − 1) / (f − 1).
+        sum_pad_below = cs_z * pfac * (pfac**npad_z_below - 1.0) / (pfac - 1.0)
         z0 = -(sum_pad_below + n_core_z * cs_z)
 
         mesh = _discretize.CylindricalMesh([hr, h_theta, hz], origin=[0.0, 0.0, z0])
@@ -503,11 +527,33 @@ class EMGeometry:
                 "discretize is required.  Install with: pip install discretize"
             )
 
-        # ── 1. Mesh ───────────────────────────────────────────────────────────
+        # ── Solver setup (used by both tree and cylindrical paths) ───────────
+        try:
+            from simpeg.utils import get_default_solver
+            default_solver = get_default_solver()
+        except Exception:
+            default_solver = None
+
+        # ── 1. Mesh / dispatch ────────────────────────────────────────────────
+        if self.mesh_type == "tree":
+            # Per-depth TreeMesh path: build + solve + parse per station
+            if verbose:
+                n_depths = int(np.floor(self.borehole_length / self.measuring_spacing)) + 1
+                print(
+                    f"[TreeMesh] {n_depths} depth positions × "
+                    f"{len(self.frequencies)} freq(s) × "
+                    f"{len(self.coil_spacings)} spacing(s) — "
+                    "one local simulation per depth."
+                )
+            n_depths = int(np.floor(self.borehole_length / self.measuring_spacing)) + 1
+            depths   = np.arange(n_depths) * self.measuring_spacing
+            return self._run_per_depth(depths, default_solver, verbose)
+
+        # ── CylindricalMesh path (original) ──────────────────────────────────
         if verbose:
             n_th = max(1, self.n_theta_cells)
-            mesh_type = "CylindricalMesh (axisymmetric)" if n_th == 1 else f"CylindricalMesh ({n_th} theta cells)"
-            print(f"Building 3-D {mesh_type} …")
+            mtype = "CylindricalMesh (axisymmetric)" if n_th == 1 else f"CylindricalMesh ({n_th} theta cells)"
+            print(f"Building 3-D {mtype} …")
         mesh = self.make_mesh_3d()
         if verbose:
             sr, st, sz = mesh.shape_cells
@@ -544,12 +590,6 @@ class EMGeometry:
                 "  SimPEG performs one LU factorisation per frequency and solves "
                 f"all {n_depths} depth RHS vectors simultaneously."
             )
-
-        try:
-            from simpeg.utils import get_default_solver
-            default_solver = get_default_solver()
-        except Exception:
-            default_solver = None
 
         sim_kwargs = dict(
             mesh=mesh,
@@ -600,6 +640,207 @@ class EMGeometry:
         if verbose:
             print(f"  Parsed {len(records)} data points into DataFrame.")
 
+        return pd.DataFrame(records)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _make_local_tree_mesh(self, depth: float) -> "_discretize.TreeMesh":
+        """
+        Build a small OcTree (``TreeMesh``) centred on one tool depth.
+
+        The mesh covers the required lateral and vertical extent.  With
+        ``h = [N * [cs]]`` (N equal cells of size *cs*), the discretize
+        ``TreeMesh`` invariant gives::
+
+            max_level = log2(N)
+            finest cell size  = cs          (at insert level = max_level)
+            coarsest cell size = cs * N     (at insert level = 0)
+
+        N is chosen as the smallest power of 2 such that ``N * cs`` covers
+        the required span on each axis.
+
+        Parameters
+        ----------
+        depth : float
+            Transmitter depth (m, positive-downward).
+
+        Returns
+        -------
+        discretize.TreeMesh
+        """
+        if not _DISCRETIZE_AVAILABLE:
+            raise ImportError("discretize is required.  pip install discretize")
+
+        cs          = self.core_cell_size
+        dom         = self.domain_radius
+        max_spacing = max(self.coil_spacings)
+        min_spacing = min(self.coil_spacings)
+
+        # TX / RX z-coordinates (SimPEG: +z upward, z=0 surface)
+        z_tx = -depth
+        z_rx = z_tx - max_spacing if not self.receiver_above else z_tx + max_spacing
+
+        # Vertical padding: boundary at least half the domain radius from TX/RX
+        z_pad    = max(dom * 0.5, max_spacing * 4.0)
+        z_top    = min(z_tx + z_pad, +dom)
+        z_bottom = max(z_rx - z_pad, -dom)
+
+        # Required spans to cover
+        xy_span = 2.0 * dom
+        z_span  = z_top - z_bottom
+
+        # N per axis: smallest power-of-2 so that N * cs >= required_span.
+        # With h = [N * [cs]], max_level = log2(N) and finest cell = cs.
+        nx = max(8, int(2 ** np.ceil(np.log2(max(1.0, xy_span / cs)))))
+        nz = max(8, int(2 ** np.ceil(np.log2(max(1.0, z_span  / cs)))))
+
+        # Maximum refinement levels available on each axis
+        max_level_xy = int(np.log2(nx))
+        max_level_z  = int(np.log2(nz))
+        max_level    = min(max_level_xy, max_level_z)
+
+        # Centre the mesh on the TX-RX midpoint (z) and the borehole axis (xy)
+        z_mid    = 0.5 * (z_tx + z_rx)
+        z_origin = z_mid - nz * cs / 2.0
+
+        x0 = [-nx * cs / 2.0, -nx * cs / 2.0, z_origin]
+
+        mesh = _discretize.TreeMesh(
+            [nx * [cs], nx * [cs], nz * [cs]],
+            x0=x0,
+        )
+
+        # Refinement along the TX-RX segment (borehole axis: x=0, y=0)
+        cs_z = max(cs, min_spacing / 5.0)
+        n_bh = max(3, int(np.ceil(abs(z_tx - z_rx) / cs_z)) + 1)
+        z_bh = np.linspace(z_tx, z_rx, n_bh)
+
+        n_shells = min(max_level, 5)
+
+        for shell_idx in range(n_shells):
+            level_here = max_level - shell_idx   # finest = max_level, coarser outward
+            if level_here < 1:
+                break
+
+            if shell_idx == 0:
+                # Axis itself — finest refinement
+                pts = np.column_stack([np.zeros(n_bh), np.zeros(n_bh), z_bh])
+            else:
+                # Concentric cylinder at radius r_shell
+                r_shell = cs * (2 ** shell_idx)
+                arcs = [
+                    np.column_stack([
+                        r_shell * np.cos(ang) * np.ones(n_bh),
+                        r_shell * np.sin(ang) * np.ones(n_bh),
+                        z_bh,
+                    ])
+                    for ang in np.linspace(0, 2 * np.pi, 8, endpoint=False)
+                ]
+                pts = np.vstack(arcs)
+
+            mesh.insert_cells(
+                pts,
+                level_here * np.ones(len(pts), dtype=int),
+                finalize=False,
+            )
+
+        mesh.finalize()
+        return mesh
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _run_per_depth(
+        self,
+        depths: np.ndarray,
+        default_solver,
+        verbose: bool,
+    ) -> pd.DataFrame:
+        """
+        Run FDEM forward simulation once per tool depth using a local TreeMesh.
+
+        Each depth position is independent:
+        1. Build a small OcTree mesh centred on that depth.
+        2. Paint conductivity from the 1-D layer model.
+        3. Build a single-depth survey (all frequencies, all spacings).
+        4. Solve the FEM system and extract H-field at receiver locations.
+        5. Append parsed records and proceed to the next depth.
+
+        Parameters
+        ----------
+        depths : np.ndarray
+            Array of transmitter depths (m, positive-downward).
+        default_solver : solver class or None
+            SimPEG linear solver (from ``get_default_solver``).
+        verbose : bool
+            Print progress to stdout.
+
+        Returns
+        -------
+        pd.DataFrame
+        """
+        MU0    = 4.0 * np.pi * 1e-7
+        n_tot  = len(depths)
+        records: list = []
+
+        for i_d, depth in enumerate(depths):
+            if verbose:
+                print(
+                    f"  [TreeMesh] depth {i_d + 1}/{n_tot}: "
+                    f"{depth:.2f} m  ",
+                    end="",
+                    flush=True,
+                )
+
+            # ── Local mesh for this depth ─────────────────────────────────────
+            mesh_d  = self._make_local_tree_mesh(depth)
+            sigma_d = self._paint_conductivity(mesh_d)
+
+            if verbose:
+                print(f"({mesh_d.nC:,} cells)", flush=True)
+
+            # ── Single-depth survey ───────────────────────────────────────────
+            survey_d = self._build_survey(np.array([depth]))
+
+            # ── Simulation ───────────────────────────────────────────────────
+            sim_kwargs: dict = dict(
+                mesh=mesh_d,
+                survey=survey_d,
+                sigmaMap=_maps.IdentityMap(nP=mesh_d.nC),
+            )
+            if default_solver is not None:
+                sim_kwargs["solver"] = default_solver
+
+            sim_d   = fdem.Simulation3DElectricField(**sim_kwargs)
+            dpred_d = sim_d.dpred(sigma_d)
+
+            # ── Parse dpred ───────────────────────────────────────────────────
+            # Order (same as _build_survey for a single depth):
+            #   outer: frequencies  →  inner: spacings  →  (real, imag) pair
+            idx = 0
+            for freq in self.frequencies:
+                for spacing in self.coil_spacings:
+                    b_real = float(dpred_d[idx])
+                    b_imag = float(dpred_d[idx + 1])
+                    idx   += 2
+                    h_real = b_real / MU0
+                    h_imag = b_imag / MU0
+                    records.append(
+                        {
+                            "depth":     float(depth),
+                            "spacing":   float(spacing),
+                            "frequency": float(freq),
+                            "real":      h_real,
+                            "imag":      h_imag,
+                            "amplitude": float(np.sqrt(h_real**2 + h_imag**2)),
+                            "phase":     float(
+                                np.degrees(np.arctan2(h_imag, h_real))
+                            ),
+                            "apparent_resistivity": self._lin_apparent_resistivity(
+                                h_imag, spacing, freq
+                            ),
+                        }
+                    )
+
+        if verbose:
+            print(f"  Parsed {len(records)} data points into DataFrame.")
         return pd.DataFrame(records)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -684,12 +925,42 @@ class EMGeometry:
         -------
         matplotlib.figure.Figure
         """
+        mesh_cls = type(mesh).__name__
+
+        # ── TreeMesh branch ──────────────────────────────────────────────────
+        if "TreeMesh" in mesh_cls:
+            fig, ax = plt.subplots(figsize=figsize)
+            if sigma is not None:
+                v = np.log10(np.clip(sigma, 1e-12, None))
+                try:
+                    out = mesh.plot_slice(
+                        v, v_type="CC", normal="Y", ax=ax,
+                        pcolor_opts=dict(cmap="viridis"),
+                    )
+                    plt.colorbar(out[0], ax=ax, label="log₁₀(σ)  [S/m]")
+                except Exception:
+                    # Fallback: scatter at y≈0 cells
+                    y_cc = mesh.gridCC[:, 1]
+                    mask = np.abs(y_cc) < (max(self.coil_spacings) * 0.05 + 0.01)
+                    x_pl = mesh.gridCC[mask, 0]
+                    z_pl = mesh.gridCC[mask, 2]
+                    sc   = ax.scatter(x_pl, z_pl, c=v[mask], cmap="viridis", s=6)
+                    plt.colorbar(sc, ax=ax, label="log₁₀(σ)  [S/m]")
+            else:
+                mesh.plot_grid(ax=ax)
+            ax.set_xlabel("x  (m)")
+            ax.set_ylabel("z  (m, + upward)")
+            ax.set_title(f"TreeMesh  |  y = 0 slice  ({mesh.nC:,} cells)")
+            plt.tight_layout()
+            return fig
+
+        # ── CylindricalMesh branch (original) ────────────────────────────────
         fig, ax = plt.subplots(figsize=figsize)
 
         # For CylindricalMesh: gridCC columns are (r, theta, z)
         # Keep only one theta-slice (they all represent the same r-z plane)
-        r_cc   = mesh.gridCC[:, 0]   # radial coordinate
-        z_cc   = mesh.gridCC[:, 2]   # vertical coordinate
+        r_cc     = mesh.gridCC[:, 0]   # radial coordinate
+        z_cc     = mesh.gridCC[:, 2]   # vertical coordinate
         theta_cc = mesh.gridCC[:, 1]
 
         # Use the smallest theta value (first slice)
@@ -1039,6 +1310,7 @@ if __name__ == "__main__":
         core_cell_size=0.05,       # coarse for quick test
         n_padding=8,
         domain_radius=50.0,
+        mesh_type="tree",  # Options: "cylindrical" (default), "tree"
     )
 
     print("=== Mesh inspection ===")

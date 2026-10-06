@@ -141,10 +141,17 @@ Settings (top of the script):
 | `ERT_MEAS_SPACING` | Tool step along the hole (m). |
 | `EM_COIL_SPACINGS`, `EM_BUCKING` | Main transmitter–receiver distance per EM tool, and the bucking receiver distance for each (`None` = plain two-coil). |
 | `LAYERS`, `BOREHOLE_*`, `BACKFILL_SWEEP`, `EM_FREQUENCIES`, `OUTPUT_DIR` | As in `run_combined.py`. |
+| `REUSE_SAVED_RESULTS` | `True` redraws all figures from `results/realistic_logs.csv` without simulating again (seconds instead of ~30 minutes). |
 
 With the defaults it takes about **30 minutes and up to ~17 GB of RAM**: ring electrodes on a tool body need a finer ERT mesh (~1.2M cells). Setting `ERT_MEAS_SPACING = 0.2` roughly halves both.
 
-Outputs in `results/`: `realistic_log_backfill_<rho>.png` (all tool logs for each backfill, dotted = no borehole) and `realistic_backfill_effect.png` (with-hole / no-hole ratio per tool), plus a printed summary table.
+Outputs in `results/`:
+
+- `realistic_log_backfill_<rho>.png`: the model, a **to-scale close-up of the tools in the hole** at mid-depth (ERT sonde with its tool body and ring electrodes A, M, N; EM tool with transmitter, bucking and main receiver; the window is shaded on the model), and all tool logs for that backfill (dotted = no borehole).
+- `realistic_backfill_effect.png`: with-hole / no-hole ratio per tool.
+- `realistic_logs.csv`: every simulated value (tool, depth, apparent resistivity, backfill; empty backfill = no-borehole reference), plus a printed summary table.
+
+![Realistic tools, 1 Ohm.m backfill](results/realistic_log_backfill_1.png)
 
 Replace the example spacings and tool diameter with those of your sondes. The physics of these tools is described in [docs/user_guide.md](docs/user_guide.md#realistic-tools).
 
@@ -229,6 +236,7 @@ geometry_class/
     em_geometry.py            EM: cylindrical / octree mesh, SimPEG forward model
     borehole_model.py         shared resistivity model (layers, borehole zones, air)
     analytic.py               exact reference solutions used by the tests
+    plotting.py               drawing helpers (tools-in-the-hole close-up)
 tests/test_validation.py      validation against the analytic solutions
 docs/user_guide.md            full documentation
 results/                      figures written by run_combined.py

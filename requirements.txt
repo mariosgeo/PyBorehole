@@ -5,3 +5,5 @@ pyvista
 simpeg
 discretize
 pandas
+scipy
+pytest

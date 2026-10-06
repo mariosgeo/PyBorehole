@@ -1,0 +1,129 @@
+"""
+Validation of the ERT and EM simulators against analytic solutions.
+
+    pytest tests/                 # all tests (ERT tests take a few minutes)
+    pytest tests/ -m "not slow"   # EM + model tests only (seconds)
+"""
+import os
+import sys
+import warnings
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+warnings.filterwarnings("ignore")
+
+from geometry_class import EMGeometry, Geometry  # noqa: E402
+from geometry_class.analytic import borehole_wenner_rhoa, fullspace_hs  # noqa: E402
+from geometry_class.borehole_model import make_zones, resistivity_rz  # noqa: E402
+
+LAYERS_HOMOG = np.array([[0.0, 20.0, 100.0]])
+
+
+# ── Shared model ──────────────────────────────────────────────────────────────
+def test_resistivity_model():
+    layers = np.array([[0.0, 5.0, 100.0], [5.0, 10.0, 10.0]])
+    zones = make_zones(0.2, 8.0, 1.0, [(0.05, 1e6), (0.1, 30.0, 2.0, 6.0)])
+    r = np.array([0.02, 0.08, 0.08, 0.5, 0.5, 0.5])
+    d = np.array([3.0, 3.0, 7.0, 3.0, 7.0, 50.0])
+    rho = resistivity_rz(r, d, layers, 5.0, zones, air_resistivity=1e8)
+    np.testing.assert_allclose(rho, [1e6, 30.0, 10.0, 100.0, 10.0, 10.0])
+    rho0 = resistivity_rz(r, d, layers, 5.0, zones, include_borehole=False)
+    np.testing.assert_allclose(rho0, [100.0, 100.0, 10.0, 100.0, 10.0, 10.0])
+    assert resistivity_rz(0.5, -1.0, layers, 5.0, zones, air_resistivity=1e8)[0] == 1e8
+
+
+# ── EM ────────────────────────────────────────────────────────────────────────
+def _em(rho_bf, **kw):
+    kw.setdefault("air_resistivity", 1e8)
+    kw.setdefault("measuring_spacing", 10.0)
+    return EMGeometry(borehole_length=20.0, borehole_diameter=0.2, layer_1d_geometry=LAYERS_HOMOG,
+                      backfill_resistivity=rho_bf, frequencies=[400.0, 8000.0],
+                      coil_spacings=[0.5, 1.0], **kw)
+
+
+def test_em_fullspace_matches_analytic():
+    """Homogeneous full space (air = formation, no hole): quadrature within 2 %."""
+    df = _em(100.0, air_resistivity=100.0).run(verbose=False, include_borehole=False)
+    df = df[np.isclose(df.tx_depth, 10.0)]
+    assert len(df) == 4
+    for _, row in df.iterrows():
+        hs, _ = fullspace_hs(100.0, row.frequency, row.spacing)
+        assert abs(row.imag / hs.imag - 1) < 0.02
+        assert abs(row.apparent_resistivity / 100.0 - 1) < 0.02
+
+
+def test_em_borehole_effect_converged():
+    """Conductive backfill: default mesh within 1.5 % of a 4x radially refined mesh."""
+    pick = lambda df: df[np.isclose(df.tx_depth, 10.0)].apparent_resistivity.values
+    coarse = pick(_em(1.0).run(verbose=False))
+    fine = pick(_em(1.0, borehole_cells=40).run(verbose=False))
+    np.testing.assert_allclose(coarse, fine, rtol=0.015)
+    assert coarse[0] < 25.0  # strong effect for s=0.5 m: ~19 Ohm.m instead of 100
+
+
+def test_em_tool_stays_in_borehole():
+    df = _em(1.0, measuring_spacing=0.5).run(verbose=False)
+    rx = df.tx_depth + df.spacing
+    assert rx.max() <= 20.0 + 1e-9
+    np.testing.assert_allclose(df.depth, df.tx_depth + df.spacing / 2)
+
+
+def test_em_transverse_needs_theta_cells():
+    with pytest.raises(ValueError):
+        _em(1.0, coil_orientation="x")
+
+
+# ── ERT ───────────────────────────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def ert_setup():
+    geo = Geometry(borehole_length=15.0, borehole_diameter=0.2, layer_1d_geometry=np.array([[0.0, 15.0, 100.0]]),
+                   backfill_resistivity=1.0, long_spacing=1.0)
+    plc = geo.make_basic_geometry(vtk_filename=None)
+    data = geo.make_array(plc, (1, 4, 2, 3), 0.5, 1.0, 0.1, protocol_filename=None)
+    mesh = geo.make_mesh(plc, vtk_filename=None)
+    return geo, mesh, data
+
+
+def _ert_mid(sim, a_w):
+    z = np.array([[sim.sensorPosition(int(i))[2] for i in sim(k)] for k in "abmn"])
+    zs = np.sort(z, axis=0)
+    sel = np.isclose(zs[1] - zs[0], a_w) & (z.mean(0) < -5.0) & (z.mean(0) > -10.0)
+    return np.array(sim("rhoa"))[sel]
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("rho_bf", [1.0, 1000.0])
+def test_ert_borehole_matches_analytic(ert_setup, rho_bf):
+    """Wenner in an infinite borehole: 3D P2 result within 0.5 % of the Hankel solution."""
+    geo, mesh, data = ert_setup
+    geo.set_borehole(backfill_resistivity=rho_bf)
+    sim = geo.run(mesh, data, output_filename=None)
+    for a_w in (0.5, 1.0):
+        exact = borehole_wenner_rhoa(a_w, 0.1, rho_bf, 100.0)
+        assert abs(_ert_mid(sim, a_w).mean() / exact - 1) < 0.005
+
+
+@pytest.mark.slow
+def test_ert_no_borehole_reference(ert_setup):
+    geo, mesh, data = ert_setup
+    sim = geo.run(mesh, data, output_filename=None, include_borehole=False)
+    np.testing.assert_allclose(np.array(sim("rhoa")), 100.0, rtol=1e-3)
+
+
+def test_ert_boundary_markers():
+    geo = Geometry(borehole_length=5.0, borehole_diameter=0.2, layer_1d_geometry=np.array([[0.0, 5.0, 100.0]]),
+                   backfill_resistivity=1.0, long_spacing=1.0, n_segments=12,
+                   borehole_area=1e-3, near_area=1e-1, mid_area=1.0)
+    plc = geo.make_basic_geometry(vtk_filename=None)
+    geo.make_array(plc, (1, 4, 2, 3), 0.5, 1.0, 0.5, protocol_filename=None)
+    mesh = geo.make_mesh(plc, vtk_filename=None)
+    for b in mesh.boundaries():
+        if b.outside():
+            assert b.marker() == (-1 if abs(b.center()[2]) < 1e-6 else -2)
+        else:
+            assert b.marker() == 0
+    # Borehole cells carry the backfill resistivity and fill the (equal-area) hole volume
+    vol = sum(c.size() for c in mesh.cells() if c.center()[2] > -5.0 and np.hypot(c.center()[0], c.center()[1]) < 0.1)
+    assert abs(vol / (np.pi * 0.1**2 * 5.0) - 1) < 0.05

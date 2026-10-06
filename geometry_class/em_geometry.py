@@ -31,8 +31,11 @@ Notes
 -----
 * The borehole axis is the z-axis (r=0).  Surface is at z=0; depth is
   negative.  This matches the SimPEG/discretize convention (+z upward).
-* The 1-D layer model is "painted" onto the mesh by z-coordinate of each
-  cell centre — no borehole-fluid correction is applied.
+* The resistivity model (layers, concentric borehole zones, air) comes from
+  ``borehole_model.resistivity_rz`` and is shared with the ERT ``Geometry``
+  class.  ``run(include_borehole=False)`` gives the no-borehole reference.
+* Two z-directed coils on the borehole axis form a *coaxial* pair.
+* SimPEG uses the e^{+i omega t} time convention.
 * ``gridCC`` for a CylindricalMesh returns columns (r, theta, z); column 2
   is always z so ``_paint_conductivity`` works unchanged.
 * Raw secondary H-field values (A/m) are returned.
@@ -46,6 +49,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
+
+from .borehole_model import make_zones, resistivity_rz
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -90,14 +95,21 @@ class EMGeometry:
     borehole_length : float
         Total depth of the borehole (m).
     borehole_diameter : float
-        Diameter of the borehole (m) — used only for visualisation.
+        Diameter of the borehole (m).
     layer_1d_geometry : np.ndarray, shape (N, 3), optional
         Layer table with columns ``[top_depth, bottom_depth, resistivity]``.
         Depths are positive-downward (m); resistivity in Ω·m.
     background_resistivity : float, optional
-        Resistivity (Ω·m) assigned to all cells not covered by an explicit
-        layer (i.e. above the first layer, below the last layer, and the
-        outer far-field).  Defaults to 5.0.
+        Formation resistivity (Ω·m) when no layers are given.  The last layer
+        extends to infinite depth.  Legacy: also used as the borehole fill
+        when ``backfill_resistivity`` is not given.  Defaults to 5.0.
+    backfill_resistivity : float, optional
+        Resistivity of the borehole backfill (Ω·m).
+    borehole_zones : list, optional
+        Concentric zones ``(r_outer, resistivity[, top[, bottom]])`` or
+        ``BoreholeZone`` objects; overrides ``backfill_resistivity``.
+    air_resistivity : float, optional
+        Resistivity of the air above the surface.  Defaults to 1e8 Ω·m.
     frequencies : list of float
         Transmitter frequencies (Hz), e.g. ``[400.0, 8000.0]``.
     coil_spacings : list of float
@@ -107,22 +119,21 @@ class EMGeometry:
     coil_orientation : str
         Coil-axis orientation:
 
-        * ``'z'`` — Vertical Magnetic Dipole (VMD); coils are horizontal
-          (HCP configuration).  Default.
-        * ``'x'`` or ``'y'`` — Horizontal Magnetic Dipole (HMD); coils are
-          vertical (VCP / HLP configuration).
+        * ``'z'`` — coil axes along the borehole: coaxial pair (standard
+          induction logging tool).  Default.
+        * ``'x'`` or ``'y'`` — coil axes across the borehole: coplanar pair.
 
     measuring_spacing : float, optional
         Depth step for sliding the tool (m).  Defaults to 0.1 m.
     receiver_above : bool, optional
         If ``False`` (default) the receiver is placed *below* the transmitter
-        (deeper in borehole).  Set ``True`` to reverse.
+        (deeper in borehole).  Set ``True`` to reverse.  Both coils always stay
+        inside the borehole; the reported ``depth`` is the TX-RX midpoint.
     core_cell_size : float, optional
-        Edge length (m) of the uniform fine cells in the radial (r) direction.
-        The z-direction core cell size is auto-computed as
-        ``max(core_cell_size, min(coil_spacings) / 5)`` — relaxed to save
-        cells when the user-supplied value is finer than accuracy requires
-        (≥ 5 cells per smallest coil spacing).
+        Edge length (m) of the uniform fine cells in the radial (r) direction
+        outside the borehole (inside the borehole see ``borehole_cells``).
+        The z-direction cell size is ``min(core_cell_size, min(coil_spacings) / 20)``
+        (convergence-tested for a 1 Ω·m backfill in 100 Ω·m formation).
         Should be ≤ skin-depth / 5 at the highest frequency in the most
         conductive layer.  Defaults to 0.05 m.
     n_padding : int, optional
@@ -133,8 +144,13 @@ class EMGeometry:
         ``pad_factor`` times wider than its inner neighbour).  Defaults to 1.4.
     domain_radius : float, optional
         Outer boundary radius (m) for both the radial far-field and the
-        vertical far-field padding.  Defaults to 100.0 m.  Should be at
-        least 2–3 skin depths at the lowest frequency.
+        vertical far-field padding.  ``None`` (default) = max(100 m,
+        3 skin depths in the most resistive formation at the lowest
+        frequency).  A boundary closer than that mainly distorts the
+        in-phase field.
+    borehole_cells : int, optional
+        Number of radial cells across the innermost borehole zone (cylindrical
+        mesh).  Defaults to 10 (1 cm cells for a 0.2 m hole).
     n_theta_cells : int, optional
         Number of azimuthal cells in the CylindricalMesh.
 
@@ -165,6 +181,9 @@ class EMGeometry:
     borehole_diameter: float
     layer_1d_geometry: Optional[np.ndarray] = None
     background_resistivity: float = 5.0
+    backfill_resistivity: Optional[float] = None
+    borehole_zones: Optional[list] = None
+    air_resistivity: float = 1e8
 
     # ── EM survey parameters ───────────────────────────────────────────────────
     frequencies: List[float] = field(default_factory=lambda: [1000.0])
@@ -178,8 +197,9 @@ class EMGeometry:
     core_cell_size: float = 0.05
     n_padding: int = 10
     pad_factor: float = 1.4
-    domain_radius: float = 100.0
+    domain_radius: Optional[float] = None
     n_theta_cells: int = 1
+    borehole_cells: int = 10
 
     # ──────────────────────────────────────────────────────────────────────────
     def __post_init__(self) -> None:
@@ -212,22 +232,29 @@ class EMGeometry:
         if self.mesh_type not in ("cylindrical", "tree"):
             raise ValueError("mesh_type must be 'cylindrical' or 'tree'.")
 
-        # ── HMD + single theta cell advisory (cylindrical only) ───────────────
-        if (
-            self.coil_orientation in ("x", "y")
-            and self.n_theta_cells < 3
-            and self.mesh_type == "cylindrical"
-        ):
+        # ── Borehole zones ────────────────────────────────────────────────────
+        if self.backfill_resistivity is None and self.borehole_zones is None:
+            self.backfill_resistivity = self.background_resistivity
             warnings.warn(
-                f"HMD orientation (coil_orientation='{self.coil_orientation}') with "
-                f"n_theta_cells={self.n_theta_cells} is not azimuthally symmetric. "
-                "Results will be approximate. Consider n_theta_cells >= 8 for "
-                "accurate HMD simulation, or switch to mesh_type='tree'.",
+                "backfill_resistivity not given: using background_resistivity "
+                f"({self.background_resistivity} Ω·m) as the borehole fill.",
                 stacklevel=2,
             )
+        self.zones = make_zones(self.borehole_diameter, self.borehole_length,
+                                self.backfill_resistivity, self.borehole_zones)
 
         # ── EM parameter validation ───────────────────────────────────────────
         self.coil_orientation = self.coil_orientation.lower()
+        # A transverse dipole is not axisymmetric: one theta cell cannot represent it
+        if (
+            self.coil_orientation in ("x", "y")
+            and self.n_theta_cells < 8
+            and self.mesh_type == "cylindrical"
+        ):
+            raise ValueError(
+                f"coil_orientation='{self.coil_orientation}' on a CylindricalMesh needs "
+                f"n_theta_cells >= 8 (got {self.n_theta_cells}); or use mesh_type='tree'."
+            )
         if self.coil_orientation not in ("x", "y", "z"):
             raise ValueError("coil_orientation must be 'x', 'y', or 'z'.")
         self.frequencies = list(self.frequencies)
@@ -240,18 +267,35 @@ class EMGeometry:
             raise ValueError("measuring_spacing must be positive.")
         if self.core_cell_size <= 0:
             raise ValueError("core_cell_size must be positive.")
+        if max(self.coil_spacings) >= self.borehole_length:
+            raise ValueError("Coil spacings must be shorter than the borehole.")
+
+        # ── Domain size: >= 3 skin depths in the most resistive formation ─────
+        if self.domain_radius is None:
+            rho_max = max(self._formation_resistivities())
+            skin = 503.0 * np.sqrt(rho_max / min(self.frequencies))
+            self.domain_radius = float(max(100.0, 3.0 * skin))
+        if self.mesh_type == "tree" and self.core_cell_size > self.zones[0].r_outer / 3.0:
+            warnings.warn(
+                f"TreeMesh: core_cell_size={self.core_cell_size} m does not resolve the "
+                f"borehole (radius {self.zones[0].r_outer} m); use <= radius/3.",
+                stacklevel=2,
+            )
 
         # ── Skin-depth advisory ───────────────────────────────────────────────
         self._check_skin_depth()
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _formation_resistivities(self) -> List[float]:
+        if self.layer_1d_geometry is None:
+            return [float(self.background_resistivity)]
+        return [float(r) for r in self.layer_1d_geometry[:, 2]]
+
+    # ──────────────────────────────────────────────────────────────────────────
     def _check_skin_depth(self) -> None:
         """Issue a warning if ``core_cell_size`` is too coarse for the EM problem."""
         max_freq = max(self.frequencies)
-        res_values = [self.background_resistivity]
-        if self.layer_1d_geometry is not None:
-            res_values.extend(self.layer_1d_geometry[:, 2].tolist())
-        min_res = min(res_values)
+        min_res = min(self._formation_resistivities() + [z.resistivity for z in self.zones])
         # Approximate skin depth: δ ≈ 503 √(ρ/f)  [m]
         skin_depth = 503.0 * np.sqrt(min_res / max_freq)
         recommended = skin_depth / 5.0
@@ -282,6 +326,30 @@ class EMGeometry:
         return max(5, int(np.ceil(np.log(ratio) / np.log(pfac))))
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _radial_widths(self, pfac: float) -> np.ndarray:
+        """Radial cell widths with faces on every borehole-zone radius."""
+        cs_r = self.core_cell_size
+        dr = self.zones[0].r_outer / self.borehole_cells
+        widths: list = []
+        r_in = 0.0
+        for z in self.zones:
+            n = max(2, int(np.ceil((z.r_outer - r_in) / dr - 1e-9)))
+            widths += [(z.r_outer - r_in) / n] * n
+            r_in = z.r_outer
+        # Grow smoothly (x1.2) from the borehole cells to cs_r, uniform to r_fine
+        w, r = widths[-1], r_in
+        r_fine = max(2.0 * max(self.coil_spacings), self.borehole_diameter * 10.0)
+        while r < r_fine:
+            w = min(cs_r, w * 1.2)
+            widths.append(w)
+            r += w
+        while r < self.domain_radius:
+            w *= pfac
+            widths.append(w)
+            r += w
+        return np.array(widths)
+
+    # ──────────────────────────────────────────────────────────────────────────
     def make_mesh_3d(self) -> "_discretize.CylindricalMesh":
         """
         Build and return the 3-D ``CylindricalMesh`` for the FDEM simulation.
@@ -289,9 +357,11 @@ class EMGeometry:
         Mesh layout  (r, theta, z)
         --------------------------
         * **r** — radial axis from the borehole axis outward.
-          Fine cells (width = ``core_cell_size``) extend to
-          ``3 × max(coil_spacings)``; geometric padding expands to
-          ``domain_radius``.
+          Inside the borehole, cell faces fall exactly on every zone radius
+          (``borehole_cells`` cells across the innermost zone); outside, cells
+          grow smoothly (x1.2) to ``core_cell_size``, stay uniform to
+          ``max(2 × max(coil_spacings), 10 × borehole diameter)`` and then
+          expand geometrically to ``domain_radius``.
         * **theta** — azimuthal axis.
           ``n_theta_cells = 1`` (default, VMD): one cell covering 2π —
           fully axisymmetric, exact for VMD.
@@ -311,14 +381,8 @@ class EMGeometry:
 
         pfac = self.pad_factor
 
-        # ── Radial (r) — fine for dipole source resolution ──────────────────
-        cs_r = self.core_cell_size
-        # Fine cells: axis → 2× largest coil spacing (resolves TX-RX near-field)
-        r_fine = max(2.0 * max(self.coil_spacings), self.borehole_diameter * 10.0)
-        n_fine_r = max(5, int(np.ceil(r_fine / cs_r)))
-        # Geometric padding: r_fine → domain_radius
-        npad_r = self._n_pad_cells(r_fine, self.domain_radius, cs_r, pfac)
-        hr = [(cs_r, n_fine_r), (cs_r, npad_r, pfac)]
+        # ── Radial (r) — borehole zones resolved, then fine, then padding ───
+        hr = self._radial_widths(pfac)
 
         # ── Azimuthal (theta) ────────────────────────────────────────────────
         n_th = max(1, self.n_theta_cells)
@@ -328,11 +392,11 @@ class EMGeometry:
             dtheta = 2.0 * np.pi / n_th
             h_theta = [dtheta] * n_th     # uniform azimuthal cells
 
-        # ── Vertical (z) — auto-optimised cell size ──────────────────────────
-        # Accuracy requirement: ≥ 5 cells within the smallest coil spacing.
-        # If core_cell_size is finer than required, relax it to save cells.
-        cs_z_min = min(self.coil_spacings) / 5.0
-        cs_z = max(self.core_cell_size, cs_z_min)
+        # ── Vertical (z) cell size ───────────────────────────────────────────
+        # A conductive borehole channels current along the hole; resolving the
+        # resulting vertical field variation needs >= 20 cells per smallest coil
+        # spacing (s/5 under-predicts the borehole effect by ~10 %).
+        cs_z = min(self.core_cell_size, min(self.coil_spacings) / 20.0)
 
         n_core_z    = int(np.ceil(self.borehole_length / cs_z)) + 1
         n_above     = max(2, self.n_padding // 4)   # 2–3 cells above z=0 is enough
@@ -359,159 +423,154 @@ class EMGeometry:
         return mesh
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _paint_conductivity(
-        self, mesh: "_discretize.TensorMesh"
-    ) -> np.ndarray:
+    def _paint_conductivity(self, mesh, include_borehole: bool = True) -> np.ndarray:
         """
-        Assign per-cell conductivity (S/m) based on the 1-D layer model.
+        Per-cell conductivity (S/m) from the shared borehole model.
 
-        Layer assignment is done by the z-coordinate of each cell centre
-        (z positive upward, surface at z=0):
-
-        * Cells with ``z_bottom < z_center ≤ z_top`` belong to that layer.
-        * All remaining cells (air above surface, half-space below last layer,
-          and the lateral far-field) receive ``background_resistivity``.
+        Cells are classified by their centre: air above z=0, borehole zones by
+        radial distance from the axis, and the 1-D layers (last layer extending
+        to infinite depth) everywhere else.  ``include_borehole=False`` gives
+        the no-borehole reference model.
 
         Parameters
         ----------
-        mesh : discretize.TensorMesh
+        mesh : discretize.CylindricalMesh or discretize.TreeMesh
+        include_borehole : bool, optional
 
         Returns
         -------
         np.ndarray, shape (mesh.nC,)
-            Conductivity (S/m) at every cell centre.
         """
-        z_cc = mesh.gridCC[:, 2]  # z-coordinates of all cell centres
-        sigma = np.full(mesh.nC, 1.0 / self.background_resistivity)  # background
-
-        if self.layer_1d_geometry is not None:
-            for row in self.layer_1d_geometry:
-                top_depth    = float(row[0])
-                bottom_depth = float(row[1])
-                resistivity  = float(row[2])
-
-                z_top    = -top_depth     # e.g. top_depth=0  → z=0
-                z_bottom = -bottom_depth  # e.g. bottom_depth=5 → z=−5
-
-                in_layer = (z_cc > z_bottom) & (z_cc <= z_top)
-                sigma[in_layer] = 1.0 / resistivity
-
-        return sigma
+        cc = mesh.gridCC
+        if "Cyl" in type(mesh).__name__:
+            r = cc[:, 0]                      # (r, theta, z)
+        else:
+            r = np.hypot(cc[:, 0], cc[:, 1])  # (x, y, z)
+        rho = resistivity_rz(r, -cc[:, 2], self.layer_1d_geometry, self.background_resistivity,
+                             self.zones, include_borehole, self.air_resistivity)
+        return 1.0 / rho
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _build_survey(
-        self, depths: np.ndarray
-    ) -> "fdem.survey.Survey":
+    def _build_survey(self, depths: np.ndarray):
         """
         Construct the FDEM survey with all sources and receivers.
 
-        **Construction order** (critical for correct ``dpred`` parsing):
-
-        .. code-block::
-
-            for freq in self.frequencies:          # outer loop
-                for depth in depths:               # middle loop
-                    source = MagDipole(...)
-                        for spacing in self.coil_spacings:   # inner loop
-                            receiver_real = PointMagneticFluxDensitySecondary(..., 'real')
-                            receiver_imag = PointMagneticFluxDensitySecondary(..., 'imag')
-
-        Note
-        ----
-        SimPEG 0.21+ uses ``PointMagneticFluxDensitySecondary`` (B-field, T).
-        The ``run()`` method converts B → H by dividing by μ₀ so that the
-        returned DataFrame columns remain in A/m.
+        One ``MagDipole`` source per (frequency, transmitter depth); one
+        real + one imaginary ``PointMagneticFluxDensitySecondary`` receiver
+        per coil spacing whose receiver still lies inside the borehole.
 
         Parameters
         ----------
         depths : np.ndarray
-            Tool depth positions (m, positive-downward).
+            Transmitter depths (m, positive-downward).
 
         Returns
         -------
-        fdem.survey.Survey
+        survey : fdem.survey.Survey
+        meta : list of (frequency, tx_depth, spacing)
+            One entry per (real, imag) receiver pair, in ``dpred`` order.
         """
         source_list: list = []
+        meta: list = []
+        tol = 1e-9
 
         for freq in self.frequencies:
             for depth in depths:
-                tx_z   = -float(depth)
-                tx_loc = np.array([[0.0, 0.0, tx_z]])
-
                 receivers: list = []
                 for spacing in self.coil_spacings:
-                    if self.receiver_above:
-                        rx_z = -(depth - spacing)
-                    else:
-                        rx_z = -(depth + spacing)
-
-                    rx_loc = np.array([[0.0, 0.0, float(rx_z)]])
-
-                    receivers.append(
-                        fdem.receivers.PointMagneticFluxDensitySecondary(
-                            locations=rx_loc,
-                            orientation=self.coil_orientation,
-                            component="real",
+                    rx_depth = depth - spacing if self.receiver_above else depth + spacing
+                    if not (-tol <= rx_depth <= self.borehole_length + tol):
+                        continue  # the tool cannot leave the borehole
+                    rx_loc = np.array([[0.0, 0.0, -float(rx_depth)]])
+                    for component in ("real", "imag"):
+                        receivers.append(
+                            fdem.receivers.PointMagneticFluxDensitySecondary(
+                                locations=rx_loc,
+                                orientation=self.coil_orientation,
+                                component=component,
+                            )
                         )
+                    meta.append((float(freq), float(depth), float(spacing)))
+                if not receivers:
+                    continue
+                source_list.append(
+                    fdem.sources.MagDipole(
+                        receiver_list=receivers,
+                        frequency=freq,
+                        location=np.array([[0.0, 0.0, -float(depth)]]),
+                        orientation=self.coil_orientation,
                     )
-                    receivers.append(
-                        fdem.receivers.PointMagneticFluxDensitySecondary(
-                            locations=rx_loc,
-                            orientation=self.coil_orientation,
-                            component="imag",
-                        )
-                    )
-
-                src = fdem.sources.MagDipole(
-                    receiver_list=receivers,
-                    frequency=freq,
-                    location=tx_loc,
-                    orientation=self.coil_orientation,
                 )
-                source_list.append(src)
 
-        return fdem.survey.Survey(source_list)
+        return fdem.survey.Survey(source_list), meta
 
     # ──────────────────────────────────────────────────────────────────────────
-    def run(self, verbose: bool = True) -> pd.DataFrame:
+    def _tx_depths(self) -> np.ndarray:
+        n_depths = int(np.floor(self.borehole_length / self.measuring_spacing + 1e-9)) + 1
+        return np.arange(n_depths) * self.measuring_spacing
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def _records(self, dpred_vec: np.ndarray, meta: list) -> list:
+        """Turn ``dpred`` (B in T, real/imag pairs) into records with H in A/m."""
+        MU0 = 4.0 * np.pi * 1e-7  # H/m
+        records: list = []
+        for i, (freq, tx_depth, spacing) in enumerate(meta):
+            h_real = float(dpred_vec[2 * i]) / MU0
+            h_imag = float(dpred_vec[2 * i + 1]) / MU0
+            rx_depth = tx_depth - spacing if self.receiver_above else tx_depth + spacing
+            records.append(
+                {
+                    "depth":     0.5 * (tx_depth + rx_depth),
+                    "tx_depth":  tx_depth,
+                    "spacing":   spacing,
+                    "frequency": freq,
+                    "real":      h_real,
+                    "imag":      h_imag,
+                    "amplitude": float(np.hypot(h_real, h_imag)),
+                    "phase":     float(np.degrees(np.arctan2(h_imag, h_real))),
+                    "apparent_resistivity": self._lin_apparent_resistivity(h_imag, spacing, freq),
+                }
+            )
+        return records
+
+    # ──────────────────────────────────────────────────────────────────────────
+    def run(self, verbose: bool = True, include_borehole: bool = True) -> pd.DataFrame:
         """
         Run the 3-D FDEM forward simulation.
 
         Workflow
         --------
-        1. Build a 3-D ``TensorMesh`` via :meth:`make_mesh_3d`.
-        2. Paint the 1-D layer conductivities onto the mesh via
+        1. Build the mesh via :meth:`make_mesh_3d` (or one TreeMesh per depth).
+        2. Paint the model (layers, borehole zones, air) via
            :meth:`_paint_conductivity`.
         3. Build the FDEM survey via :meth:`_build_survey`.
-        4. Instantiate ``Simulation3DElectricField`` with
-           ``sigmaMap = IdentityMap(nP=mesh.nC)``.
-        5. Call ``sim.dpred(sigma)`` — SimPEG batches all sources that share
-           the same frequency into a single factorised linear solve.
-        6. Parse the flat ``dpred`` vector (same order as source construction)
-           into a tidy ``pd.DataFrame``.
+        4. ``Simulation3DElectricField`` with ``sigmaMap = IdentityMap``;
+           ``sim.dpred`` factorises once per frequency and solves all
+           transmitter positions together.
+        5. Parse ``dpred`` into a tidy ``pd.DataFrame``.
 
         Parameters
         ----------
         verbose : bool, optional
             Print progress messages.  Defaults to ``True``.
+        include_borehole : bool, optional
+            ``False`` replaces the borehole by formation (no-borehole
+            reference for the borehole effect).  Defaults to ``True``.
 
         Returns
         -------
         pd.DataFrame
-            One row per ``(depth, spacing, frequency)`` combination with columns:
+            One row per ``(position, spacing, frequency)`` with columns:
 
-            * ``depth``     — tool depth (m, positive-downward)
+            * ``depth``     — TX-RX midpoint depth (m, positive-downward)
+            * ``tx_depth``  — transmitter depth (m)
             * ``spacing``   — coil spacing (m)
             * ``frequency`` — frequency (Hz)
             * ``real``      — real part of H_secondary (A/m)  [= B_real/μ₀]
             * ``imag``      — imaginary part of H_secondary (A/m)  [= B_imag/μ₀]
             * ``amplitude`` — |H_secondary| (A/m)
             * ``phase``     — phase angle (°)
-
-        Note
-        ----
-        Internally uses ``PointMagneticFluxDensitySecondary`` (B-field, Tesla)
-        and divides by μ₀ = 4π×10⁻⁷ H/m to yield H in A/m.
+            * ``apparent_resistivity`` — LIN apparent resistivity (Ω·m)
 
         Raises
         ------
@@ -534,22 +593,19 @@ class EMGeometry:
         except Exception:
             default_solver = None
 
+        depths = self._tx_depths()
+
         # ── 1. Mesh / dispatch ────────────────────────────────────────────────
         if self.mesh_type == "tree":
-            # Per-depth TreeMesh path: build + solve + parse per station
             if verbose:
-                n_depths = int(np.floor(self.borehole_length / self.measuring_spacing)) + 1
                 print(
-                    f"[TreeMesh] {n_depths} depth positions × "
+                    f"[TreeMesh] {len(depths)} depth positions × "
                     f"{len(self.frequencies)} freq(s) × "
                     f"{len(self.coil_spacings)} spacing(s) — "
                     "one local simulation per depth."
                 )
-            n_depths = int(np.floor(self.borehole_length / self.measuring_spacing)) + 1
-            depths   = np.arange(n_depths) * self.measuring_spacing
-            return self._run_per_depth(depths, default_solver, verbose)
+            return self._run_per_depth(depths, default_solver, verbose, include_borehole)
 
-        # ── CylindricalMesh path (original) ──────────────────────────────────
         if verbose:
             n_th = max(1, self.n_theta_cells)
             mtype = "CylindricalMesh (axisymmetric)" if n_th == 1 else f"CylindricalMesh ({n_th} theta cells)"
@@ -557,40 +613,21 @@ class EMGeometry:
         mesh = self.make_mesh_3d()
         if verbose:
             sr, st, sz = mesh.shape_cells
-            print(f"  Mesh: {mesh.nC:,} cells  (n_r={sr}, n_theta={st}, n_z={sz})")
+            print(f"  Mesh: {mesh.nC:,} cells  (n_r={sr}, n_theta={st}, n_z={sz}), "
+                  f"domain radius {self.domain_radius:.0f} m")
 
         # ── 2. Conductivity model ─────────────────────────────────────────────
+        sigma = self._paint_conductivity(mesh, include_borehole)
         if verbose:
-            print("Painting conductivity model onto mesh …")
-        sigma = self._paint_conductivity(mesh)
-        if verbose:
-            print(
-                f"  σ range: {sigma.min():.4g} – {sigma.max():.4g} S/m  "
-                f"(ρ range: {1/sigma.max():.4g} – {1/sigma.min():.4g} Ω·m)"
-            )
+            print(f"  Model {'with' if include_borehole else 'without'} borehole; "
+                  f"σ range: {sigma.min():.4g} – {sigma.max():.4g} S/m")
 
         # ── 3. Survey ─────────────────────────────────────────────────────────
-        n_depths = int(np.floor(self.borehole_length / self.measuring_spacing)) + 1
-        depths   = np.arange(n_depths) * self.measuring_spacing
-
-        n_sources = len(self.frequencies) * n_depths
+        survey, meta = self._build_survey(depths)
         if verbose:
-            print(
-                f"Building survey: "
-                f"{len(self.frequencies)} freq(s) × {n_depths} depths "
-                f"× {len(self.coil_spacings)} spacing(s) "
-                f"= {n_sources} sources …"
-            )
-        survey = self._build_survey(depths)
+            print(f"Building survey: {survey.nSrc} sources, {len(meta)} TX-RX pairs …")
 
         # ── 4. Simulation ─────────────────────────────────────────────────────
-        if verbose:
-            print("Running Simulation3DElectricField …")
-            print(
-                "  SimPEG performs one LU factorisation per frequency and solves "
-                f"all {n_depths} depth RHS vectors simultaneously."
-            )
-
         sim_kwargs = dict(
             mesh=mesh,
             survey=survey,
@@ -600,46 +637,12 @@ class EMGeometry:
             sim_kwargs["solver"] = default_solver
 
         sim = fdem.Simulation3DElectricField(**sim_kwargs)
-
         dpred_vec = sim.dpred(sigma)
 
-        if verbose:
-            print("  Forward simulation complete.")
-
         # ── 5. Parse dpred ────────────────────────────────────────────────────
-        # dpred order mirrors the source_list construction order exactly:
-        #   outer: frequencies → middle: depths → inner: spacings (real, imag pairs)
-        # dpred values are B-field (T); divide by μ₀ to convert to H-field (A/m)
-        MU0 = 4.0 * np.pi * 1e-7  # H/m
-        records: list = []
-        idx = 0
-        for freq in self.frequencies:
-            for depth in depths:
-                for spacing in self.coil_spacings:
-                    b_real = float(dpred_vec[idx])
-                    b_imag = float(dpred_vec[idx + 1])
-                    idx += 2
-                    # Convert B (T) → H (A/m):  H = B / μ₀
-                    h_real = b_real / MU0
-                    h_imag = b_imag / MU0
-                    records.append(
-                        {
-                            "depth":     float(depth),
-                            "spacing":   float(spacing),
-                            "frequency": float(freq),
-                            "real":      h_real,
-                            "imag":      h_imag,
-                            "amplitude": float(np.sqrt(h_real**2 + h_imag**2)),
-                            "phase":     float(np.degrees(np.arctan2(h_imag, h_real))),
-                            "apparent_resistivity": self._lin_apparent_resistivity(
-                                h_imag, spacing, freq
-                            ),
-                        }
-                    )
-
+        records = self._records(dpred_vec, meta)
         if verbose:
-            print(f"  Parsed {len(records)} data points into DataFrame.")
-
+            print(f"  Forward simulation complete: {len(records)} data points.")
         return pd.DataFrame(records)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -722,8 +725,16 @@ class EMGeometry:
                 break
 
             if shell_idx == 0:
-                # Axis itself — finest refinement
-                pts = np.column_stack([np.zeros(n_bh), np.zeros(n_bh), z_bh])
+                # Axis and every borehole-zone wall — finest refinement
+                pts = [np.column_stack([np.zeros(n_bh), np.zeros(n_bh), z_bh])]
+                for zone in self.zones:
+                    for ang in np.linspace(0, 2 * np.pi, 16, endpoint=False):
+                        pts.append(np.column_stack([
+                            zone.r_outer * np.cos(ang) * np.ones(n_bh),
+                            zone.r_outer * np.sin(ang) * np.ones(n_bh),
+                            z_bh,
+                        ]))
+                pts = np.vstack(pts)
             else:
                 # Concentric cylinder at radius r_shell
                 r_shell = cs * (2 ** shell_idx)
@@ -752,6 +763,7 @@ class EMGeometry:
         depths: np.ndarray,
         default_solver,
         verbose: bool,
+        include_borehole: bool = True,
     ) -> pd.DataFrame:
         """
         Run FDEM forward simulation once per tool depth using a local TreeMesh.
@@ -771,16 +783,21 @@ class EMGeometry:
             SimPEG linear solver (from ``get_default_solver``).
         verbose : bool
             Print progress to stdout.
+        include_borehole : bool
+            ``False`` gives the no-borehole reference.
 
         Returns
         -------
         pd.DataFrame
         """
-        MU0    = 4.0 * np.pi * 1e-7
         n_tot  = len(depths)
         records: list = []
 
         for i_d, depth in enumerate(depths):
+            # ── Single-depth survey (skip positions with no receiver in the hole)
+            survey_d, meta_d = self._build_survey(np.array([depth]))
+            if not meta_d:
+                continue
             if verbose:
                 print(
                     f"  [TreeMesh] depth {i_d + 1}/{n_tot}: "
@@ -791,13 +808,10 @@ class EMGeometry:
 
             # ── Local mesh for this depth ─────────────────────────────────────
             mesh_d  = self._make_local_tree_mesh(depth)
-            sigma_d = self._paint_conductivity(mesh_d)
+            sigma_d = self._paint_conductivity(mesh_d, include_borehole)
 
             if verbose:
                 print(f"({mesh_d.nC:,} cells)", flush=True)
-
-            # ── Single-depth survey ───────────────────────────────────────────
-            survey_d = self._build_survey(np.array([depth]))
 
             # ── Simulation ───────────────────────────────────────────────────
             sim_kwargs: dict = dict(
@@ -809,35 +823,7 @@ class EMGeometry:
                 sim_kwargs["solver"] = default_solver
 
             sim_d   = fdem.Simulation3DElectricField(**sim_kwargs)
-            dpred_d = sim_d.dpred(sigma_d)
-
-            # ── Parse dpred ───────────────────────────────────────────────────
-            # Order (same as _build_survey for a single depth):
-            #   outer: frequencies  →  inner: spacings  →  (real, imag) pair
-            idx = 0
-            for freq in self.frequencies:
-                for spacing in self.coil_spacings:
-                    b_real = float(dpred_d[idx])
-                    b_imag = float(dpred_d[idx + 1])
-                    idx   += 2
-                    h_real = b_real / MU0
-                    h_imag = b_imag / MU0
-                    records.append(
-                        {
-                            "depth":     float(depth),
-                            "spacing":   float(spacing),
-                            "frequency": float(freq),
-                            "real":      h_real,
-                            "imag":      h_imag,
-                            "amplitude": float(np.sqrt(h_real**2 + h_imag**2)),
-                            "phase":     float(
-                                np.degrees(np.arctan2(h_imag, h_real))
-                            ),
-                            "apparent_resistivity": self._lin_apparent_resistivity(
-                                h_imag, spacing, freq
-                            ),
-                        }
-                    )
+            records += self._records(sim_d.dpred(sigma_d), meta_d)
 
         if verbose:
             print(f"  Parsed {len(records)} data points into DataFrame.")
@@ -853,20 +839,17 @@ class EMGeometry:
 
         Sign convention
         ---------------
-        SimPEG uses the ``e^{-iomega*t}`` time convention:
-          Im(H_sec) < 0  for a conductive earth (LIN regime).
-        We negate h_imag internally so the sign matches McNeill (1980),
-        which uses e^{+iomega*t} where Im > 0 for conductive earth.
+        SimPEG uses the ``e^{+iomega*t}`` time convention, in which
+        Im(H_sec) < 0 for a conductive earth; we use q = -Im(H_sec).
 
-        Geometry (full-space borehole)
-        --------------------------------
-        McNeill's original coefficients (k=8pi VMD, k=16pi HMD) are for a
-        surface dipole above a half-space.  In a borehole the tool is
-        surrounded by medium on all sides (full-space), so the quadrature
-        response is 2x larger for the same sigma, and k is halved:
+        Geometry (full space around the tool)
+        -------------------------------------
+        Expanding the exact full-space dipole fields to first order in
+        omega*mu*sigma*s^2 gives Im(H_s/H_p) = -omega*mu*sigma*s^2/2 for both
+        geometries, hence:
 
-          VMD (orientation='z'):    k = 4*pi  (H_primary = 1 / (2*pi*s^3))
-          HMD (orientation='x/y'):  k = 8*pi  (H_primary = 1 / (4*pi*s^3))
+          coaxial  (orientation='z'):    k = 4*pi  (H_primary = 1 / (2*pi*s^3))
+          coplanar (orientation='x/y'):  k = 8*pi  (|H_primary| = 1 / (4*pi*s^3))
 
           sigma_a = (k * s) / (mu0 * omega) * (-h_imag)
           rho_a   = 1 / sigma_a
@@ -886,13 +869,13 @@ class EMGeometry:
         float
             Apparent resistivity (Ohm.m), or NaN if undefined.
         """
-        # Negate: SimPEG e^{-iwt} gives Im(H_sec) < 0 for conductive earth
+        # Negate: SimPEG e^{+iwt} gives Im(H_sec) < 0 for a conductive earth
         q = -h_imag
         if q <= 0.0:
             return float("nan")
         MU0   = 4.0 * np.pi * 1e-7
         omega = 2.0 * np.pi * freq
-        # Full-space borehole coefficients (half of McNeill's surface values)
+        # Full-space coefficients (coaxial / coplanar)
         k = 4.0 * np.pi if self.coil_orientation == "z" else 8.0 * np.pi
         sigma_a = (k * spacing) / (MU0 * omega) * q
         return float(1.0 / sigma_a)
@@ -1302,15 +1285,12 @@ if __name__ == "__main__":
         borehole_length=15.0,
         borehole_diameter=0.2,
         layer_1d_geometry=layers,
-        background_resistivity=50.0,
+        backfill_resistivity=1.0,
         frequencies=[400.0, 8000.0],
         coil_spacings=[0.5, 1.0],
         coil_orientation="z",
         measuring_spacing=0.5,    # coarse for quick test
-        core_cell_size=0.05,       # coarse for quick test
-        n_padding=8,
-        domain_radius=50.0,
-        mesh_type="tree",  # Options: "cylindrical" (default), "tree"
+        mesh_type="cylindrical",  # Options: "cylindrical" (default), "tree"
     )
 
     print("=== Mesh inspection ===")

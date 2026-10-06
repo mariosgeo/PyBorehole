@@ -1,0 +1,278 @@
+# PyBorehole user guide
+
+This guide covers everything beyond the quick start in the [README](../README.md): the model, all parameters of the two simulator classes, their outputs, how to trade accuracy against run time, the physics, and common problems.
+
+Most users only need [`run_combined.py`](../run_combined.py). Read on if you want to change the borehole build-up, use the classes in your own scripts, or understand what the numbers mean.
+
+## Contents
+
+1. [The model](#1-the-model)
+2. [ERT simulator: `Geometry`](#2-ert-simulator-geometry)
+3. [EM simulator: `EMGeometry`](#3-em-simulator-emgeometry)
+4. [Measuring the borehole effect](#4-measuring-the-borehole-effect)
+5. [Accuracy and run time](#5-accuracy-and-run-time)
+6. [Physics and boundary conditions](#6-physics-and-boundary-conditions)
+7. [Testing](#7-testing)
+8. [Troubleshooting](#8-troubleshooting)
+
+---
+
+## 1. The model
+
+Both simulators read the same model, defined in [`geometry_class/borehole_model.py`](../geometry_class/borehole_model.py), so the ERT and EM logs are directly comparable.
+
+**Coordinates.** The borehole axis is vertical through `x = y = 0`. Depths are positive downward from the surface (depth 0). Internally the meshes use `z = -depth`.
+
+**Layers** (`layer_1d_geometry`). An array with one row per layer, `[top_depth, bottom_depth, resistivity]`:
+
+```python
+layers = np.array([
+    [0.0,   5.0, 100.0],
+    [5.0,  10.0,  10.0],
+    [10.0, 15.0, 200.0],
+])
+```
+
+- The first top depth is forced to 0 (with a warning).
+- The last layer continues downward to the bottom of the model.
+- Without layers, the formation is a half-space of resistivity `background_resistivity`.
+
+**Borehole.** A vertical cylinder from the surface to `borehole_length`, with diameter `borehole_diameter`. Its content is either:
+
+- one material, given by `backfill_resistivity`, or
+- concentric zones, given by `borehole_zones`. Each zone is a tuple `(r_outer, resistivity[, top[, bottom]])` and fills the ring from the previous zone's radius (or the axis) out to `r_outer`, between depths `top` (default 0) and `bottom` (default: the borehole bottom). Outside its depth interval the ring belongs to the formation.
+
+```python
+# PVC-cased well: water inside the casing, gravel pack outside, bentonite seal at the top
+zones = [
+    (0.045, 20.0),             # water inside the casing
+    (0.050, 1e6),              # 5 mm PVC wall
+    (0.100, 30.0, 2.0, 15.0),  # gravel pack from 2 to 15 m
+]
+```
+
+Rules and current limits:
+
+- The outermost zone radius may not exceed the borehole radius.
+- Every zone needs its own radius, so one ring cannot hold two materials at different depths. In this example the ring between 5 and 10 cm is formation from 0 to 2 m; a bentonite seal in that interval can't be added in the same run.
+- Thin zones (such as a 5 mm casing wall) are resolved exactly but make the ERT mesh larger, because cells have to be smaller than the zone is thick.
+- A closed PVC wall blocks the ERT current, as in reality: galvanic tools only see the formation through open hole or a slotted screen.
+
+**Legacy behaviour.** If neither `backfill_resistivity` nor `borehole_zones` is given, `background_resistivity` is used as the borehole fill, with a warning. This keeps old scripts and `demo.ipynb` working.
+
+**Air** (EM only) has resistivity `air_resistivity` (default 1e8 Ohm.m). ERT needs no air: the surface is a no-flux boundary.
+
+---
+
+## 2. ERT simulator: `Geometry`
+
+[`geometry_class/geometry.py`](../geometry_class/geometry.py) uses PyGIMLi and TetGen.
+
+### Workflow
+
+```python
+geo  = Geometry(borehole_length=15, borehole_diameter=0.2, layer_1d_geometry=layers,
+                backfill_resistivity=10.0, long_spacing=1.0)
+plc  = geo.make_basic_geometry()                  # 1. geometry (PLC)
+data = geo.make_array(plc, (1, 4, 2, 3), 0.5, 1.0, 0.1)  # 2. electrodes + protocol
+mesh = geo.make_mesh(plc)                         # 3. TetGen mesh
+sim  = geo.run(mesh, data)                        # 4. forward model
+geo.plot_model_and_data(sim)                      # 5. quick plot
+```
+
+The order matters: electrodes are added to the geometry before meshing, so every electrode becomes a mesh node.
+
+### Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `borehole_length` | required | Borehole depth (m). |
+| `borehole_diameter` | required | Borehole diameter (m). |
+| `layer_1d_geometry` | `None` | Layer table (see §1). |
+| `background_resistivity` | 5.0 | Half-space resistivity when there are no layers; legacy backfill (see §1). |
+| `backfill_resistivity` | `None` | Resistivity of a uniform backfill (Ohm.m). |
+| `borehole_zones` | `None` | Concentric zones (see §1); overrides `backfill_resistivity`. |
+| `long_spacing` | 1.0 | Largest electrode spacing you will use (m). Sizes the refined zone around the hole. |
+| `n_segments` | 24 | Number of sides of the polygons that approximate circles. |
+| `near_radius` | 10 × borehole radius | Radius of the finely meshed zone around the hole (m). |
+| `mid_radius` | max(3 × `long_spacing`, 2 × `near_radius`) | Radius of the medium zone (m). |
+| `world_radius` | 100.0 | Radius of the model (m). |
+| `world_depth` | `borehole_length + world_radius` | Depth of the model bottom (m). |
+| `borehole_area`, `near_area`, `mid_area` | from the zone sizes | Maximum tetrahedron volume (m³) in each zone. |
+| `world_area` | 0 | Maximum volume in the far field; 0 = no limit. |
+| `p2` | `True` | Quadratic elements. Keep `True` (see §5). |
+
+### Methods
+
+| Method | What it does |
+|---|---|
+| `make_basic_geometry(vtk_filename="plc.vtk")` | Builds the geometry: concentric polygons (borehole zones → near zone → mid zone → world) cut by horizontal planes at every layer interface, zone top/bottom and the borehole bottom. Each piece is its own region. Pass `vtk_filename=None` to skip the VTK file. |
+| `make_array(geom, abmn_order, short_spacing, long_spacing, measuring_spacing, protocol_filename="protocol.dat")` | Puts electrodes every `measuring_spacing` along the axis, from 0 to `borehole_length`, and builds the protocol for the two spacings. `abmn_order` gives the positions of A, B, M, N in the array, e.g. `(1, 4, 2, 3)` = Wenner A–M–N–B. Returns a `pg.DataContainerERT`. |
+| `make_mesh(geom, vtk_filename="mesh.vtk", quality=1.3)` | Runs TetGen and sets the boundary markers. `quality` is TetGen's radius–edge ratio; keep 1.2–1.4. |
+| `run(mesh, data, rhomap=None, output_filename="simulated_data.dat", noise_level=0, noise_abs=0, include_borehole=True)` | Forward model. Returns a data container with `rhoa` (apparent resistivity), `r` (resistance) and `k` (geometric factor). `include_borehole=False` replaces the hole by formation. |
+| `set_borehole(backfill_resistivity=None, borehole_zones=None)` | Changes the borehole resistivities on the existing mesh. The zone radii and depths must stay the same. |
+| `cell_resistivity(mesh, include_borehole=True)` | Resistivity of every cell, e.g. for plotting. |
+| `resistivity_at(r, depth, include_borehole=True)` | Model resistivity at any point. |
+| `plot_model_and_data(data)` | Model section plus the two spacing logs. |
+| `plot_boundary_conditions(mesh)` | 3D view of the boundary markers (PyVista). |
+
+---
+
+## 3. EM simulator: `EMGeometry`
+
+[`geometry_class/em_geometry.py`](../geometry_class/em_geometry.py) uses SimPEG's frequency-domain E-field formulation.
+
+### Workflow
+
+```python
+em  = EMGeometry(borehole_length=15, borehole_diameter=0.2, layer_1d_geometry=layers,
+                 backfill_resistivity=10.0, frequencies=[400, 8000], coil_spacings=[0.5, 1.0])
+log = em.run()
+em.plot_model_and_log(log)
+```
+
+Everything happens inside `run()`: mesh, model, survey, solve. With the cylindrical mesh SimPEG factorises the system once per frequency and solves all tool positions together, so a full log takes seconds.
+
+### Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `borehole_length`, `borehole_diameter`, `layer_1d_geometry`, `background_resistivity`, `backfill_resistivity`, `borehole_zones` | | As for `Geometry` (§1). |
+| `air_resistivity` | 1e8 | Resistivity of the air (Ohm.m). |
+| `frequencies` | `[1000.0]` | Frequencies (Hz). |
+| `coil_spacings` | `[1.0]` | Transmitter–receiver distances (m). Must be shorter than the borehole. |
+| `coil_orientation` | `"z"` | `"z"`: coil axes along the hole (coaxial, as in standard induction tools). `"x"`/`"y"`: across the hole (coplanar); needs `n_theta_cells >= 8` or `mesh_type="tree"`. |
+| `measuring_spacing` | 0.1 | Tool step along the hole (m). |
+| `receiver_above` | `False` | Receiver below (default) or above the transmitter. |
+| `mesh_type` | `"cylindrical"` | `"cylindrical"`: axisymmetric, fast, recommended. `"tree"`: one 3D octree per tool position; slow, for future non-axisymmetric models. |
+| `core_cell_size` | 0.05 | Radial cell size outside the hole (m). The vertical cell size is `min(core_cell_size, smallest spacing / 20)`. |
+| `borehole_cells` | 10 | Radial cells across the innermost borehole zone. |
+| `domain_radius` | `None` | Model radius (m). `None` = max(100 m, 3 skin depths in the most resistive layer at the lowest frequency). |
+| `pad_factor` | 1.4 | Growth factor of the padding cells. |
+| `n_padding` | 10 | Sets the number of uniform cells above the surface (`n_padding // 4`). |
+| `n_theta_cells` | 1 | Azimuthal cells of the cylindrical mesh; 1 is exact for coaxial coils. |
+
+### Output of `run()`
+
+A pandas DataFrame with one row per tool position, coil spacing and frequency:
+
+| Column | Meaning |
+|---|---|
+| `depth` | Tool centre: midpoint between transmitter and receiver (m). |
+| `tx_depth` | Transmitter depth (m). |
+| `spacing` | Coil spacing (m). |
+| `frequency` | Frequency (Hz). |
+| `real`, `imag` | Secondary magnetic field H (A/m) for a unit-moment transmitter. |
+| `amplitude`, `phase` | Magnitude (A/m) and phase (degrees) of the secondary field. |
+| `apparent_resistivity` | Low-induction-number apparent resistivity (Ohm.m). |
+
+Both coils always stay inside the borehole, so a log covers depths from s/2 to `borehole_length` − s/2.
+
+Other methods: `make_mesh_3d()` returns the cylindrical mesh, `plot_mesh_slice(mesh, sigma)` shows it, and `plot_log(result, quantity)` / `plot_model_and_log(result, quantity)` plot any output column.
+
+---
+
+## 4. Measuring the borehole effect
+
+The borehole effect is the ratio between the same tool with and without the hole:
+
+```python
+ratio_ert = np.array(geo.run(mesh, data)("rhoa")) / \
+            np.array(geo.run(mesh, data, include_borehole=False)("rhoa"))
+
+with_hole, no_hole = em.run(), em.run(include_borehole=False)
+ratio_em = with_hole.apparent_resistivity / no_hole.apparent_resistivity
+```
+
+`include_borehole=False` fills the hole with formation and leaves everything else (mesh, tool positions, layers) unchanged, so the ratio isolates the hole. It removes the layer and shoulder effects that a comparison against the true resistivity would mix in.
+
+For a backfill sweep, build the ERT mesh once and change only the resistivity with `geo.set_borehole(backfill_resistivity=...)`; `run_combined.py` does exactly this.
+
+---
+
+## 5. Accuracy and run time
+
+### ERT
+
+The default mesh reproduces the analytic borehole solution within 0.1%. Its cost depends mostly on the borehole diameter, the electrode step and the borehole length:
+
+| Default case (15 m, D = 0.2 m, 151 electrodes) | |
+|---|---|
+| Cells | ~375 000 |
+| Meshing | ~25 s |
+| One solve (P2) | ~1–2.5 min |
+| Peak memory | ~12 GB |
+
+To make it cheaper, in order of preference:
+
+1. Increase `ERT_MEAS_SPACING` / `measuring_spacing` (fewer electrodes, fewer refined nodes).
+2. Simulate a shorter borehole section.
+3. Increase `near_area` / `borehole_area` and check the result against the analytic test (`pytest tests -m slow`).
+4. `p2=False` halves the cost but leaves a bias of a few percent for strong borehole contrasts.
+
+Settings that matter for accuracy, which you normally shouldn't change:
+
+- `quality` in `make_mesh`: values above 2 allow badly shaped tetrahedra. The old default of 34.2 is a 2D value and gave errors of about 17%.
+- `n_segments`: fewer than 12 sides misrepresents the hole; the polygons are scaled to the same area as the true circle.
+- `p2`: linear elements cannot resolve the field around an electrode inside a high-contrast hole.
+
+### EM
+
+The defaults are convergence-tested: the borehole effect changes by less than 1.5% when the radial cells are refined 4× and by less than 0.4% for finer vertical cells. A full log runs in seconds. If you change the borehole diameter a lot, keep `borehole_cells` at 10 or more and check that `core_cell_size` stays well below the skin depth (the class warns if it doesn't).
+
+---
+
+## 6. Physics and boundary conditions
+
+### ERT
+
+- **Equation:** DC potential, ∇·(σ∇u) = −I δ(r − r_s), solved with finite elements (PyGIMLi).
+- **Boundaries:** the surface is no-flux (marker −1); the outer side and the bottom use a mixed (Robin) condition (marker −2), which assumes the field decays like a point source there.
+- **Singularity removal:** the potential near each electrode is split into an analytic part and a smooth numerical part, which is what makes small electrode spacings accurate.
+- **Apparent resistivity:** ρa = k · ΔV / I with the analytic half-space geometric factor *k*, which includes image electrodes above the surface. A homogeneous earth therefore returns its true resistivity at any depth.
+
+### EM
+
+- **Equation:** frequency-domain Maxwell equations, E-field formulation (SimPEG), with a point magnetic dipole source of unit moment. SimPEG uses the e^{+iωt} time convention.
+- **Boundaries:** tangential E = 0 at the outer boundary, placed at least 3 skin depths away so that it doesn't affect the result. The axis of the cylindrical mesh is handled exactly.
+- **Measured quantity:** the secondary magnetic field (total minus free-space primary) at the receiver.
+- **Apparent resistivity:** low-induction-number formula for a tool surrounded by the medium:
+  σa = k · s · (−Im H_s) / (μ₀ ω), with k = 4π for coaxial and 8π for coplanar coils. It is accurate when the coil spacing is much smaller than the skin depth δ ≈ 503 √(ρ/f) m; for the defaults (s ≤ 1 m, δ ≥ 18 m) the error is below 2%.
+
+### Why the two tools react differently
+
+ERT measures currents that the electrodes inject directly into the borehole fill, so a conductive backfill channels current along the hole. Short arrays read close to the backfill; longer Wenner arrays can overshoot the formation. Induction measures eddy currents that loop around the axis, so a conductive annulus adds its own conductivity in proportion to its share of the tool's sensitivity, which is large for short coils. A resistive backfill blocks very little eddy current, so its effect on induction is small.
+
+---
+
+## 7. Testing
+
+```bash
+pytest tests/ -m "not slow"   # model + EM tests, ~15 s
+pytest tests/                 # all tests, ~5 min
+```
+
+[`tests/test_validation.py`](../tests/test_validation.py) checks:
+
+- the shared model (zones, layers, air, the no-borehole switch),
+- EM against the analytic full-space dipole field and against a refined mesh,
+- that the EM tool stays inside the hole and that invalid coil settings are rejected,
+- ERT against the analytic infinite-borehole Wenner response (`slow`),
+- the ERT no-borehole reference and the boundary markers.
+
+The reference solutions are in [`geometry_class/analytic.py`](../geometry_class/analytic.py) and can be used on their own, e.g. `borehole_wenner_rhoa(a, radius, rho_hole, rho_formation)`.
+
+---
+
+## 8. Troubleshooting
+
+| Problem | Cause and fix |
+|---|---|
+| `FileNotFoundError: ...-1.node` while meshing | TetGen isn't found. Install it (`conda install -c conda-forge tetgen`) and run inside the activated environment. |
+| ERT run is killed or the machine swaps | Not enough memory; see §5 to reduce the model size. |
+| Warning `backfill_resistivity not given` | You passed only `background_resistivity`; it is used as the backfill. Pass `backfill_resistivity` explicitly. |
+| Warning `quality=... is a 2D min-angle value` | Use `quality` between 1.2 and 1.4 in `make_mesh`. |
+| `ValueError: coil_orientation='x' ... needs n_theta_cells >= 8` | Coplanar coils aren't axisymmetric; set `n_theta_cells=8` or more, or use `mesh_type="tree"`. |
+| `ValueError: Outermost borehole zone ... exceeds the borehole radius` | A zone radius is larger than `borehole_diameter / 2`. |
+| `ValueError: set_borehole can only change resistivities` | You changed zone radii or depths; build a new geometry and mesh. |
+| `apparent_resistivity` is NaN | The quadrature field has the wrong sign, which happens far outside the low-induction-number range (very conductive ground, high frequency, long spacing). Use the `real`/`imag` fields instead. |

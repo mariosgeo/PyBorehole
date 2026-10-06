@@ -5,8 +5,8 @@ Runs both the ERT (Geometry / PyGIMLi) and EM (EMGeometry / SimPEG)
 forward simulations over the same 1-D layered earth and borehole model,
 with and without the borehole, for a sweep of backfill resistivities.
 
-Outputs
--------
+Outputs (in ``OUTPUT_DIR``, default ``results/``)
+-------------------------------------------------
 * ``combined_log_backfill_<rho>.png`` -- apparent-resistivity logs (ERT Wenner
   + EM coils) for every backfill resistivity in the sweep, with the
   no-borehole reference curves.
@@ -68,9 +68,12 @@ EM_COIL_SPACINGS  = [0.5, 1.0]
 EM_FREQUENCIES    = [400.0, 8000.0]
 EM_MEAS_SPACING   = 0.1
 EM_MESH_TYPE      = "cylindrical"
+
+OUTPUT_DIR        = "results"               # all figures are written here
 # ---------------------------------------------------------------------------
 
 sweep = sorted(set(BACKFILL_SWEEP) | {BACKFILL_RES})
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 def ert_table(sim) -> pd.DataFrame:
@@ -251,7 +254,7 @@ def plot_combined(rho_bf, filename):
 print()
 print("Plotting combined results...")
 for rho_bf in sweep:
-    plot_combined(rho_bf, f"combined_log_backfill_{rho_bf:g}.png")
+    plot_combined(rho_bf, os.path.join(OUTPUT_DIR, f"combined_log_backfill_{rho_bf:g}.png"))
 
 
 # ===========================================================================
@@ -287,8 +290,9 @@ for ax, (kind, size, freq) in zip(np.atleast_1d(axes), tools):
 np.atleast_1d(axes)[0].set_ylabel("Depth (m)")
 np.atleast_1d(axes)[0].legend(title="Backfill", fontsize=8, loc="lower left")
 plt.tight_layout()
-plt.savefig("backfill_effect.png", dpi=150, bbox_inches="tight")
-print("Saved: backfill_effect.png")
+_effect_png = os.path.join(OUTPUT_DIR, "backfill_effect.png")
+plt.savefig(_effect_png, dpi=150, bbox_inches="tight")
+print(f"Saved: {_effect_png}")
 
 # Summary table at mid-depth of every layer
 print("\nBorehole effect (ratio with/without hole) at layer mid-depths:")

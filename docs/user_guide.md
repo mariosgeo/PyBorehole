@@ -133,6 +133,16 @@ em.plot_model_and_log(log)
 
 Everything happens inside `run()`: mesh, model, survey, solve. With the cylindrical mesh SimPEG factorises the system once per frequency and solves all tool positions together, so a full log takes seconds.
 
+`run(depths=[...])` simulates only the listed transmitter depths instead of the full log. Use it with the 3D octree mesh, which solves each position separately:
+
+```python
+# Off-centre tool, 2 cm from the wall of a 0.2 m hole, at three depths
+em3d = EMGeometry(borehole_length=15, borehole_diameter=0.2, layer_1d_geometry=layers,
+                  backfill_resistivity=1.0, frequencies=[400], coil_spacings=[0.5, 1.0],
+                  mesh_type="tree", tool_offset=0.08)
+log3d = em3d.run(depths=[2.0, 7.0, 12.0])
+```
+
 ### Parameters
 
 | Parameter | Default | Meaning |
@@ -144,7 +154,10 @@ Everything happens inside `run()`: mesh, model, survey, solve. With the cylindri
 | `coil_orientation` | `"z"` | `"z"`: coil axes along the hole (coaxial, as in standard induction tools). `"x"`/`"y"`: across the hole (coplanar); needs `n_theta_cells >= 8` or `mesh_type="tree"`. |
 | `measuring_spacing` | 0.1 | Tool step along the hole (m). |
 | `receiver_above` | `False` | Receiver below (default) or above the transmitter. |
-| `mesh_type` | `"cylindrical"` | `"cylindrical"`: axisymmetric, fast, validated; use this. `"tree"`: one 3D octree per tool position. **Experimental**: its refinement doesn't resolve the borehole yet and results can be off by 15% or more. |
+| `mesh_type` | `"cylindrical"` | `"cylindrical"`: axisymmetric; a full log in seconds; exact for a centred tool with coaxial coils. `"tree"`: full 3D octree, one mesh per tool position (~75k cells, ~10 s per position and frequency for a 0.2 m hole); needed for `tool_offset > 0` and recommended for `coil_orientation="x"`/`"y"`. Both are validated against the analytic borehole solution. |
+| `tool_offset` | 0.0 | Distance of the tool axis from the borehole axis (m); must be inside the hole. Needs `mesh_type="tree"`. |
+| `tree_cell_size` | `None` | Finest octree cell (m). Default min(borehole radius / 5, thinnest zone / 2, smallest spacing / 20), i.e. 2 cm for a 0.2 m hole. Halving it changes results by < 0.5% but costs ~10× more time. |
+| `tree_padding` | 4 | Cells of each size before the octree coarsens by 2. |
 | `core_cell_size` | 0.05 | Radial cell size outside the hole (m). The vertical cell size is `min(core_cell_size, smallest spacing / 20)`. |
 | `borehole_cells` | 10 | Radial cells across the innermost borehole zone. |
 | `domain_radius` | `None` | Model radius (m). `None` = max(100 m, 3 skin depths in the most resistive layer at the lowest frequency). |
@@ -240,6 +253,23 @@ The defaults are convergence-tested: the borehole effect changes by less than 1.
 - **Apparent resistivity** (`apparent_resistivity`): the resistivity of the homogeneous full space whose quadrature field −Im H_s equals the simulated one, found by inverting the exact full-space dipole formula. The quadrature of a full space rises with conductivity up to an induction number s/δ of about 1–2 and then falls; only the rising branch is used, so the result is unique.
 - **LIN apparent resistivity** (`apparent_resistivity_lin`): σa = k · s · (−Im H_s) / (μ₀ ω), with k = 4π for coaxial and 8π for coplanar coils. It assumes s ≪ δ ≈ 503 √(ρ/f) m; in a homogeneous earth it is too high by 0.3% (100 Ohm.m, 400 Hz, s = 1 m) up to 13% (1 Ohm.m, 8000 Hz, s = 1 m).
 - **In-phase field:** at these induction numbers the in-phase secondary field is ~1e-8 of the primary, below the accuracy of any mesh, so `real`, `amplitude` and `phase` should not be interpreted.
+
+### EM in 3D: the octree mesh
+
+The octree mesh is built around one tool position: cubes of `tree_cell_size` fill a box around the borehole and the coils, and every `tree_padding` cells the cells double in size, out to `domain_radius`. The tool axis is placed on a grid line. Because cubes cut the round wall, each cell gets its volume-averaged conductivity (4 × 4 × 4 samples). Arithmetic averaging fits the induced currents, which run parallel to the wall and the layers. Without averaging, shifting the grid by half a cell changed the result by up to 4%.
+
+Checks: centred tool in a borehole within 0.1–1.5% of the analytic solution; coplanar coils in a full space within 0.7%; an off-centre tool in homogeneous ground reads the true resistivity within 0.5%; a 2× finer mesh changes the off-centre result by 0.2%.
+
+**Off-centre tool in conductive backfill.** Moving the tool towards the wall *reduces* the borehole effect. For 1 Ohm.m backfill in 100 Ohm.m, 0.2 m hole, 400 Hz:
+
+| Tool offset | ρa, s = 0.5 m | ρa, s = 1 m |
+|---|---|---|
+| 0 (centred) | 19.0 | 49.1 |
+| 3 cm | 20.8 | 51.5 |
+| 6 cm | 28.7 | 60.3 |
+| 8 cm (2 cm from the wall) | 45.6 | 73.0 |
+
+Off-centre, the eddy-current loops around the tool axis cross the wall; charge builds up on it and blocks part of the current in the backfill. The geometric-factor (Doll) picture, which has no such charges, predicts almost no change, and that is indeed what the 3D solver gives for a weak contrast (50 vs 100 Ohm.m: 95.5 → 96.2 Ohm.m).
 
 ### Why the two tools react differently
 

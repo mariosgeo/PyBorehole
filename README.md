@@ -69,7 +69,7 @@ OUTPUT_DIR        = "results"               # all figures are written here
 | `EM_COIL_SPACINGS` | Transmitter–receiver distances (m) of the coaxial induction coils. |
 | `EM_FREQUENCIES` | EM frequencies (Hz). |
 | `EM_MEAS_SPACING` | Step of the EM tool along the hole (m). |
-| `EM_MESH_TYPE` | `"cylindrical"` (fast and exact for this axisymmetric problem; use this). `"tree"` (3D octree) is experimental and not yet accurate. |
+| `EM_MESH_TYPE` | `"cylindrical"` (axisymmetric, a full log in seconds; use this for a centred tool) or `"tree"` (full 3D octree, ~10 s per tool position and frequency; for an off-centre tool, see the user guide). |
 | `OUTPUT_DIR` | Folder for the figures. |
 
 ### 3. Run
@@ -174,14 +174,15 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 | ERT in a layered model (100/10/200 Ohm.m), with and without the hole | 1.7× finer mesh | within 0.04% |
 | ERT without borehole | homogeneous half-space | exact |
 | EM coaxial coils in a full space (1–100 Ohm.m), 400 and 8000 Hz | analytic dipole field | quadrature and apparent resistivity within ~1.5% |
-| EM coaxial coils in a 0.2 m borehole, backfill 1–1000 Ohm.m | Fourier–Bessel solution for an infinite borehole | quadrature within 0.1–1.7% |
+| EM coaxial coils in a 0.2 m borehole, backfill 1–1000 Ohm.m | Fourier–Bessel solution for an infinite borehole | quadrature within 0.1–1.7% (cylindrical), 0.1–1.5% (3D octree) |
+| EM coplanar coils in a full space, 3D octree | analytic dipole field | within 0.7% |
 
 ## Limitations
 
 - The borehole is vertical and the layers are horizontal.
-- The tool sits on the borehole axis; the tool body (mandrel) is not modelled.
+- The ERT tool sits on the borehole axis. The EM tool can be off-centre (`tool_offset`, 3D octree mesh). The tool body (mandrel) is not modelled.
 - ERT uses a Wenner-type array (any A, B, M, N order on equally spaced electrodes). Normal and lateral arrays are not implemented yet.
-- The EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree option is experimental and not yet accurate.
+- The default EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree solver handles off-centre tools and transverse coils but takes ~10 s per tool position and frequency, so it is meant for selected depths rather than full logs.
 - EM `real`, `amplitude` and `phase` are not meaningful at these low induction numbers (the in-phase secondary field is ~1e-8 of the primary); use the quadrature (`imag`) or the apparent resistivity.
 
 ## Repository layout

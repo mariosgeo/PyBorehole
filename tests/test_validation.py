@@ -38,9 +38,9 @@ def test_resistivity_model():
 def _em(rho_bf, **kw):
     kw.setdefault("air_resistivity", 1e8)
     kw.setdefault("measuring_spacing", 10.0)
+    kw.setdefault("frequencies", [400.0, 8000.0])
     return EMGeometry(borehole_length=20.0, borehole_diameter=0.2, layer_1d_geometry=LAYERS_HOMOG,
-                      backfill_resistivity=rho_bf, frequencies=[400.0, 8000.0],
-                      coil_spacings=[0.5, 1.0], **kw)
+                      backfill_resistivity=rho_bf, coil_spacings=[0.5, 1.0], **kw)
 
 
 def test_em_fullspace_matches_analytic():
@@ -89,6 +89,30 @@ def test_em_tool_stays_in_borehole():
     rx = df.tx_depth + df.spacing
     assert rx.max() <= 20.0 + 1e-9
     np.testing.assert_allclose(df.depth, df.tx_depth + df.spacing / 2)
+
+
+def test_em_octree_matches_analytic():
+    """3D octree path, centred tool, 1 Ohm.m backfill: within 1.5 % of the borehole solution."""
+    em = _em(1.0, mesh_type="tree", frequencies=[400.0])
+    df = em.run(verbose=False, depths=[10.0])
+    assert len(df) == 2
+    for _, row in df.iterrows():
+        hs = borehole_coaxial_hs(1.0, 100.0, 0.1, row.frequency, row.spacing)
+        assert abs(row.imag / hs.imag - 1) < 0.015
+
+
+def test_em_octree_offset_homogeneous():
+    """Off-centre tool in a homogeneous earth (backfill = formation) still reads 100 Ohm.m."""
+    df = _em(100.0, mesh_type="tree", frequencies=[400.0], tool_offset=0.06,
+             air_resistivity=100.0).run(verbose=False, depths=[10.0])
+    np.testing.assert_allclose(df.apparent_resistivity, 100.0, rtol=0.015)
+
+
+def test_em_offset_needs_octree():
+    with pytest.raises(ValueError):
+        _em(1.0, tool_offset=0.05)
+    with pytest.raises(ValueError):
+        _em(1.0, mesh_type="tree", tool_offset=0.1)  # on the wall
 
 
 def test_em_transverse_needs_theta_cells():

@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
+from matplotlib.ticker import NullFormatter, ScalarFormatter
 from matplotlib.lines import Line2D
 
 from geometry_class import Geometry, EMGeometry
@@ -283,6 +284,8 @@ for ax, (kind, size, freq) in zip(np.atleast_1d(axes), tools):
     for _, bot, _ in LAYERS[:-1]:
         ax.axhline(-bot, color="gray", ls=":", lw=0.9)
     ax.set_xscale("log")
+    ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.xaxis.set_minor_formatter(NullFormatter())
     ax.set_title(f"ERT Wenner a={size:g} m" if kind == "ERT" else f"EM s={size:g} m, {freq:.0f} Hz",
                  fontsize=10)
     ax.set_xlabel("ratio", fontsize=9)

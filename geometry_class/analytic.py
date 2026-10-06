@@ -99,3 +99,103 @@ def borehole_coaxial_hs(rho_hole, rho_formation, radius, freq, spacing):
     im, _ = quad(lambda l: integrand(l).imag, 0.0, upper, limit=4000)
     hs_fill, _ = fullspace_hs(rho_hole, freq, spacing, "z")
     return hs_fill + (re + 1j * im)
+
+
+def borehole_normal_rhoa(am, radius, rho_hole, rho_formation, depth=None):
+    """Normal (pole-pole A-M, on the axis) apparent resistivity in an infinite borehole.
+
+    ``depth`` (of the AM midpoint) adds the surface image of A to first order,
+    matching a geometric factor that includes the image, as PyGIMLi's does.
+    """
+    v = borehole_potential(am, radius, rho_hole, rho_formation)
+    g = 1.0 / am
+    if depth is not None:
+        v += rho_formation / (4.0 * np.pi * 2.0 * depth)
+        g += 1.0 / (2.0 * depth)
+    return 4.0 * np.pi * v / g
+
+
+def borehole_lateral_rhoa(ao, mn, radius, rho_hole, rho_formation, depth=None):
+    """Lateral (pole-dipole A-M-N, on the axis) apparent resistivity in an infinite borehole."""
+    am, an = ao - mn / 2.0, ao + mn / 2.0
+    v = borehole_potential(am, radius, rho_hole, rho_formation) \
+        - borehole_potential(an, radius, rho_hole, rho_formation)
+    g = 1.0 / am - 1.0 / an
+    if depth is not None:
+        # images of A at depth zA: distances to M and N are ~2 zA -/+ ...; first-order difference
+        za = depth + ao
+        img = 1.0 / (2.0 * za - am) - 1.0 / (2.0 * za - an)
+        v += rho_formation / (4.0 * np.pi) * img
+        g += img
+    return 4.0 * np.pi * v / g
+
+
+def ring_on_mandrel_potential(z, tool_radius, radius, rho_hole, rho_formation, current=1.0):
+    """Potential (V) on an insulating tool body at axial distance ``z`` from a ring electrode.
+
+    Infinite borehole (radius ``radius``, resistivity ``rho_hole``) in a
+    homogeneous formation, with a centred insulating mandrel of radius
+    ``tool_radius``; the current electrode and the measuring point are rings
+    on the mandrel surface.  With V(r,z) = (1/pi) int V~(r,l) cos(l z) dl:
+
+        hole:      V~ = B I0(l r) + C K0(l r)
+        formation: V~ = D K0(l r)
+        r = a:  sigma_h dV~/dr = -I / (2 pi a)        (all current leaves the mandrel)
+        r = R:  V~ and sigma dV~/dr continuous
+    """
+    from scipy.special import i0e, i1e, k0e, k1e
+
+    a, R = tool_radius, radius
+    sh, sf = 1.0 / rho_hole, 1.0 / rho_formation
+    q = current / (2.0 * np.pi * a)
+
+    def vt(l):
+        # Scaled Bessels, written so that every term stays finite for large l:
+        # B' = B e^{lR} and C' = C e^{-la} absorb the exponential growth.
+        xa, xR = l * a, l * R
+        ea = np.exp(-(xR - xa))  # e^{-l(R-a)} < 1
+        # Unknowns (B', C', D') with D' = D e^{-lR}:
+        # sh l [B' i1e(xa) ea - C' k1e(xa)] = -q
+        # B' i0e(xR) + C' k0e(xR) ea = D' k0e(xR)
+        # sh [B' i1e(xR) - C' k1e(xR) ea] = -sf D' k1e(xR)
+        m = np.array([
+            [sh * l * i1e(xa) * ea, -sh * l * k1e(xa), 0.0],
+            [i0e(xR), k0e(xR) * ea, -k0e(xR)],
+            [sh * i1e(xR), -sh * k1e(xR) * ea, sf * k1e(xR)],
+        ])
+        b_, c_, _ = np.linalg.solve(m, np.array([-q, 0.0, 0.0]))
+        # V~(a) = B I0(xa) + C K0(xa) = B' i0e(xa) e^{-l(R-a)} + C' k0e(xa)
+        return b_ * i0e(xa) * ea + c_ * k0e(xa)
+
+    # V~ ~ -ln(l) at small l and ~ 1/l at large l: regular quadrature up to l1,
+    # then an oscillatory Fourier integral (QAWF) to infinity
+    l1 = 20.0 / R
+    head, _ = quad(lambda l: vt(l) * np.cos(l * z), 0.0, l1, limit=2000)
+    tail, _ = quad(vt, l1, np.inf, weight="cos", wvar=z, limlst=200)
+    return (head + tail) / np.pi
+
+
+def tool_normal_rhoa(am, tool_radius, radius, rho_hole, rho_formation, depth=None):
+    """Normal (ring electrodes on an insulating tool body) apparent resistivity.
+
+    The tool constant is calibrated in a homogeneous 1 Ohm.m earth with the
+    same tool, as in ``Geometry.run``; ``depth`` (of the AM midpoint) adds the
+    surface image of A to first order in both runs.
+    """
+    img = 0.0 if depth is None else 1.0 / (4.0 * np.pi * 2.0 * depth)
+    r = ring_on_mandrel_potential(am, tool_radius, radius, rho_hole, rho_formation) + rho_formation * img
+    r_cal = ring_on_mandrel_potential(am, tool_radius, radius, 1.0, 1.0) + img
+    return r / r_cal
+
+
+def tool_lateral_rhoa(ao, mn, tool_radius, radius, rho_hole, rho_formation, depth=None):
+    """Lateral (ring electrodes on an insulating tool body) apparent resistivity, calibrated like ``tool_normal_rhoa``."""
+    am, an = ao - mn / 2.0, ao + mn / 2.0
+    img = 0.0
+    if depth is not None:
+        za = depth + ao
+        img = (1.0 / (2.0 * za - am) - 1.0 / (2.0 * za - an)) / (4.0 * np.pi)
+    v = lambda d, rh, rf: ring_on_mandrel_potential(d, tool_radius, radius, rh, rf)
+    r = v(am, rho_hole, rho_formation) - v(an, rho_hole, rho_formation) + rho_formation * img
+    r_cal = v(am, 1.0, 1.0) - v(an, 1.0, 1.0) + img
+    return r / r_cal

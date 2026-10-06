@@ -58,15 +58,31 @@ from .analytic import fullspace_hs
 from .borehole_model import make_zones, resistivity_rz
 
 
+def _bucking_weight(spacing: float, bucking: Optional[float]) -> float:
+    """Weight of the bucking receiver that cancels the direct (1/s^3) field."""
+    return 0.0 if bucking is None else -(bucking / spacing) ** 3
+
+
+def _fullspace_tool_hs(rho: float, freq: float, spacing: float, orientation: str,
+                       bucking: Optional[float] = None) -> complex:
+    """Secondary field of the (optionally bucked) coil array in a homogeneous full space."""
+    hs = fullspace_hs(rho, freq, spacing, orientation)[0]
+    if bucking is not None:
+        hs += _bucking_weight(spacing, bucking) * fullspace_hs(rho, freq, bucking, orientation)[0]
+    return hs
+
+
 @lru_cache(maxsize=None)
-def _fullspace_quadrature_curve(freq: float, spacing: float, orientation: str):
+def _fullspace_quadrature_curve(freq: float, spacing: float, orientation: str,
+                                bucking: Optional[float] = None):
     """Quadrature -Im(H_s) of a homogeneous full space versus log10(sigma), up to its maximum.
 
     -Im(H_s) rises with conductivity, peaks at an induction number s/delta ~ 1-2
     and then falls, so only the rising branch gives a unique apparent resistivity.
     """
     log_sigma = np.linspace(-8.0, 4.0, 1201)
-    q = np.array([-fullspace_hs(10.0**-ls, freq, spacing, orientation)[0].imag for ls in log_sigma])
+    q = np.array([-_fullspace_tool_hs(10.0**-ls, freq, spacing, orientation, bucking).imag
+                  for ls in log_sigma])
     i_peak = int(np.argmax(q))
     return log_sigma[: i_peak + 1], q[: i_peak + 1]
 import pandas as pd
@@ -190,6 +206,14 @@ class EMGeometry:
           its volume-averaged conductivity.  Handles an off-centre tool
           (``tool_offset``) and transverse coils.  About 10 s per position
           and frequency for a 0.2 m hole, so use few positions (``run(depths=...)``).
+    bucking_spacings : list of float or None, optional
+        Optional bucking (focusing) receiver for each coil spacing: its
+        distance from the transmitter (m, smaller than the spacing), or
+        ``None`` for a plain two-coil pair.  The bucking receiver is wound
+        against the main one with weight -(s_b/s)^3, which cancels the direct
+        field and, to first order, the response of the borehole near the axis.
+        The reported fields and apparent resistivities are those of the
+        combined array.
     tool_offset : float, optional
         Distance (m) of the tool axis from the borehole axis (``mesh_type='tree'``
         only).  Defaults to 0 (centred tool).
@@ -229,6 +253,7 @@ class EMGeometry:
     domain_radius: Optional[float] = None
     n_theta_cells: int = 1
     borehole_cells: int = 10
+    bucking_spacings: Optional[List[Optional[float]]] = None
     tool_offset: float = 0.0
     tree_cell_size: Optional[float] = None
     tree_padding: int = 4
@@ -301,6 +326,14 @@ class EMGeometry:
             raise ValueError("core_cell_size must be positive.")
         if max(self.coil_spacings) >= self.borehole_length:
             raise ValueError("Coil spacings must be shorter than the borehole.")
+        if self.bucking_spacings is None:
+            self.bucking_spacings = [None] * len(self.coil_spacings)
+        self.bucking_spacings = [None if b is None else float(b) for b in self.bucking_spacings]
+        if len(self.bucking_spacings) != len(self.coil_spacings):
+            raise ValueError("bucking_spacings needs one entry (or None) per coil spacing.")
+        for s_main, s_b in zip(self.coil_spacings, self.bucking_spacings):
+            if s_b is not None and not (0.0 < s_b < s_main):
+                raise ValueError("Each bucking spacing must lie between 0 and its coil spacing.")
 
         # ── Domain size: >= 3 skin depths in the most resistive formation ─────
         if self.domain_radius is None:
@@ -516,30 +549,41 @@ class EMGeometry:
         Returns
         -------
         survey : fdem.survey.Survey
-        meta : list of (frequency, tx_depth, spacing)
-            One entry per (real, imag) receiver pair, in ``dpred`` order.
+        meta : list of (frequency, tx_depth, spacing, bucking)
+            One entry per coil pair, in ``dpred`` order: (real, imag) of the
+            main receiver, followed by (real, imag) of the bucking receiver
+            when ``bucking`` is not None.
         """
         source_list: list = []
         meta: list = []
-        tol = 1e-9
+        # Coils must lie strictly inside the hole: a coil exactly at the surface
+        # or at the borehole bottom sits on a resistivity jump, where the
+        # interpolated field is ambiguous (spikes in the logs, worst for
+        # focused tools).
+        tol = 1e-6
+        inside = lambda d: tol < d < self.borehole_length - tol
 
         for freq in self.frequencies:
             for depth in depths:
+                if not inside(depth):
+                    continue
                 receivers: list = []
-                for spacing in self.coil_spacings:
+                for spacing, bucking in zip(self.coil_spacings, self.bucking_spacings):
                     rx_depth = depth - spacing if self.receiver_above else depth + spacing
-                    if not (-tol <= rx_depth <= self.borehole_length + tol):
+                    if not inside(rx_depth):
                         continue  # the tool cannot leave the borehole
-                    rx_loc = np.array([[self.tool_offset, 0.0, -float(rx_depth)]])
-                    for component in ("real", "imag"):
-                        receivers.append(
-                            fdem.receivers.PointMagneticFluxDensitySecondary(
-                                locations=rx_loc,
-                                orientation=self.coil_orientation,
-                                component=component,
+                    offsets = [spacing] + ([] if bucking is None else [bucking])
+                    for dist in offsets:  # main receiver, then bucking receiver
+                        z = -(depth - dist if self.receiver_above else depth + dist)
+                        for component in ("real", "imag"):
+                            receivers.append(
+                                fdem.receivers.PointMagneticFluxDensitySecondary(
+                                    locations=np.array([[self.tool_offset, 0.0, float(z)]]),
+                                    orientation=self.coil_orientation,
+                                    component=component,
+                                )
                             )
-                        )
-                    meta.append((float(freq), float(depth), float(spacing)))
+                    meta.append((float(freq), float(depth), float(spacing), bucking))
                 if not receivers:
                     continue
                 source_list.append(
@@ -563,22 +607,28 @@ class EMGeometry:
         """Turn ``dpred`` (B in T, real/imag pairs) into records with H in A/m."""
         MU0 = 4.0 * np.pi * 1e-7  # H/m
         records: list = []
-        for i, (freq, tx_depth, spacing) in enumerate(meta):
-            h_real = float(dpred_vec[2 * i]) / MU0
-            h_imag = float(dpred_vec[2 * i + 1]) / MU0
+        i = 0
+        for freq, tx_depth, spacing, bucking in meta:
+            h = complex(dpred_vec[i], dpred_vec[i + 1]) / MU0
+            i += 2
+            if bucking is not None:
+                h += _bucking_weight(spacing, bucking) * complex(dpred_vec[i], dpred_vec[i + 1]) / MU0
+                i += 2
+            h_real, h_imag = h.real, h.imag
             rx_depth = tx_depth - spacing if self.receiver_above else tx_depth + spacing
             records.append(
                 {
                     "depth":     0.5 * (tx_depth + rx_depth),
                     "tx_depth":  tx_depth,
                     "spacing":   spacing,
+                    "bucking":   np.nan if bucking is None else bucking,
                     "frequency": freq,
                     "real":      h_real,
                     "imag":      h_imag,
                     "amplitude": float(np.hypot(h_real, h_imag)),
                     "phase":     float(np.degrees(np.arctan2(h_imag, h_real))),
-                    "apparent_resistivity": self._apparent_resistivity(h_imag, spacing, freq),
-                    "apparent_resistivity_lin": self._lin_apparent_resistivity(h_imag, spacing, freq),
+                    "apparent_resistivity": self._apparent_resistivity(h_imag, spacing, freq, bucking),
+                    "apparent_resistivity_lin": self._lin_apparent_resistivity(h_imag, spacing, freq, bucking),
                 }
             )
         return records
@@ -830,7 +880,8 @@ class EMGeometry:
         return pd.DataFrame(records)
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _lin_apparent_resistivity(self, h_imag: float, spacing: float, freq: float) -> float:
+    def _lin_apparent_resistivity(self, h_imag: float, spacing: float, freq: float,
+                                  bucking: Optional[float] = None) -> float:
         """
         Low-Induction-Number (LIN) apparent resistivity for borehole EM.
 
@@ -853,6 +904,9 @@ class EMGeometry:
 
           sigma_a = (k * s) / (mu0 * omega) * (-h_imag)
           rho_a   = 1 / sigma_a
+
+        With a bucking receiver at s_b the quadrature of the combined array is
+        (1 - (s_b/s)^2) times that of the main pair, so sigma_a is divided by it.
 
         Parameters
         ----------
@@ -878,10 +932,13 @@ class EMGeometry:
         # Full-space coefficients (coaxial / coplanar)
         k = 4.0 * np.pi if self.coil_orientation == "z" else 8.0 * np.pi
         sigma_a = (k * spacing) / (MU0 * omega) * q
+        if bucking is not None:
+            sigma_a /= 1.0 - (bucking / spacing) ** 2
         return float(1.0 / sigma_a)
 
     # ──────────────────────────────────────────────────────────────────────────
-    def _apparent_resistivity(self, h_imag: float, spacing: float, freq: float) -> float:
+    def _apparent_resistivity(self, h_imag: float, spacing: float, freq: float,
+                              bucking: Optional[float] = None) -> float:
         """Apparent resistivity: the full space whose quadrature field equals the simulated one.
 
         Unlike the LIN formula this has no low-induction-number error (e.g. 13 %
@@ -890,11 +947,11 @@ class EMGeometry:
         """
         q = -h_imag  # SimPEG e^{+iwt}: Im(H_sec) < 0 for a conductive earth
         orient = "z" if self.coil_orientation == "z" else "x"
-        log_sigma, q_curve = _fullspace_quadrature_curve(float(freq), float(spacing), orient)
+        log_sigma, q_curve = _fullspace_quadrature_curve(float(freq), float(spacing), orient, bucking)
         if not (q_curve[0] < q <= q_curve[-1]):
             return float("nan")
         i = int(np.searchsorted(q_curve, q))
-        f = lambda ls: -fullspace_hs(10.0**-ls, freq, spacing, orient)[0].imag - q
+        f = lambda ls: -_fullspace_tool_hs(10.0**-ls, freq, spacing, orient, bucking).imag - q
         log_s = brentq(f, log_sigma[i - 1], log_sigma[i], xtol=1e-10)
         return float(10.0 ** -log_s)
 

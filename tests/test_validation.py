@@ -14,8 +14,10 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore")
 
-from geometry_class import EMGeometry, Geometry  # noqa: E402
-from geometry_class.analytic import borehole_coaxial_hs, borehole_wenner_rhoa, fullspace_hs  # noqa: E402
+from geometry_class import EMGeometry, Geometry, merge_protocols  # noqa: E402
+from geometry_class.analytic import (borehole_coaxial_hs, borehole_potential, borehole_wenner_rhoa,  # noqa: E402
+                                     fullspace_hs, ring_on_mandrel_potential, tool_lateral_rhoa,
+                                     tool_normal_rhoa)
 from geometry_class.borehole_model import make_zones, resistivity_rz  # noqa: E402
 
 LAYERS_HOMOG = np.array([[0.0, 20.0, 100.0]])
@@ -185,3 +187,57 @@ def test_ert_electrodes_avoid_interfaces():
     assert np.isclose(depths[0], 0.005)
     assert np.min(np.abs(depths[:, None] - np.array([2.0, 4.0, 6.0])[None, :])) > 1e-3
     assert geo.borehole_area < area_before
+
+
+# ── Realistic tools ──────────────────────────────────────────────────────────
+def test_analytic_mandrel_limits():
+    """Ring-on-mandrel solution: a vanishing tool gives the on-axis point solution; far away -> rho/(4 pi z)."""
+    for z in (0.4064, 1.6256):
+        np.testing.assert_allclose(ring_on_mandrel_potential(z, 1e-4, 0.1, 1.0, 100.0),
+                                   borehole_potential(z, 0.1, 1.0, 100.0), rtol=1e-4)
+    np.testing.assert_allclose(ring_on_mandrel_potential(5.0, 0.025, 0.1, 1.0, 1.0), 1 / (4 * np.pi * 5.0), rtol=1e-3)
+
+
+def test_em_bucking_matches_analytic():
+    """Focused (bucked) coaxial tool in a 1 Ohm.m backfilled hole: within 2 % of the analytic solution."""
+    em = EMGeometry(borehole_length=20.0, borehole_diameter=0.2, layer_1d_geometry=LAYERS_HOMOG,
+                    backfill_resistivity=1.0, frequencies=[400.0], coil_spacings=[0.5],
+                    bucking_spacings=[0.25], measuring_spacing=10.0)
+    row = em.run(verbose=False).query("tx_depth == 10.0").iloc[0]
+    exact = borehole_coaxial_hs(1.0, 100.0, 0.1, 400.0, 0.5) \
+        - 0.5**3 * borehole_coaxial_hs(1.0, 100.0, 0.1, 400.0, 0.25)
+    assert abs(row.imag / exact.imag - 1) < 0.02
+    assert row.apparent_resistivity > 60.0   # two-coil tool reads ~19 Ohm.m here
+
+
+def test_merge_protocols():
+    geo = Geometry(borehole_length=6.0, borehole_diameter=0.2, layer_1d_geometry=np.array([[0.0, 6.0, 100.0]]),
+                   backfill_resistivity=1.0, long_spacing=2.0)
+    plc = geo.make_basic_geometry(vtk_filename=None)
+    d1 = geo.make_tool_array(plc, "normal", [0.4064], 0.5)
+    d2 = geo.make_tool_array(plc, "lateral", [1.83], 0.5, mn_spacing=0.2)
+    m = merge_protocols(d1, d2)
+    assert m.size() == d1.size() + d2.size()
+    assert m.sensorCount() < d1.sensorCount() + d2.sensorCount() + 1
+    assert set(np.array(m["protocol"])) == {0.0, 1.0}
+    assert np.all(np.array(m("b")) == -1)
+
+
+@pytest.mark.slow
+def test_ert_tool_rings_match_analytic():
+    """Ring electrodes on a 5 cm insulating tool in 1000 Ohm.m backfill (the case where point
+    electrodes are ~20 % off): normal and lateral within 0.5 % of the Fourier-Bessel solution."""
+    geo = Geometry(borehole_length=10.0, borehole_diameter=0.2, layer_1d_geometry=np.array([[0.0, 10.0, 100.0]]),
+                   backfill_resistivity=1000.0, long_spacing=2.0, tool_diameter=0.05)
+    plc = geo.make_basic_geometry(vtk_filename=None)
+    p = merge_protocols(geo.make_tool_array(plc, "normal", [0.4064], 0.5),
+                        geo.make_tool_array(plc, "lateral", [1.83], 0.5, mn_spacing=0.2))
+    mesh = geo.make_mesh(plc, vtk_filename=None)
+    s = geo.run(mesh, p, output_filename=None)
+    r, dep, prot = np.array(s["rhoa"]), np.array(s["depthref"]), np.array(s["protocol"])
+    for pi in (0, 1):
+        sel = (prot == pi) & (dep > 4.0) & (dep < 6.0)
+        z = dep[sel].mean()
+        exact = (tool_normal_rhoa(0.4064, 0.025, 0.1, 1000.0, 100.0, z) if pi == 0
+                 else tool_lateral_rhoa(1.83, 0.2, 0.025, 0.1, 1000.0, 100.0, z))
+        assert abs(r[sel].mean() / exact - 1) < 0.005

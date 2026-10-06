@@ -120,6 +120,36 @@ What these default results show:
 
 ---
 
+## Realistic tools: `run_realistic.py`
+
+`run_combined.py` uses idealised tools: point electrodes on the borehole axis in a Wenner array, and a plain two-coil EM tool. **[`run_realistic.py`](run_realistic.py)** repeats the backfill study with tools that behave like real logging sondes:
+
+| | `run_combined.py` | `run_realistic.py` |
+|---|---|---|
+| ERT electrodes | points on the axis | rings on an insulating tool body (default 50 mm) |
+| ERT arrays | Wenner (A, M, N, B all downhole) | **normal** (A–M on the sonde, B and N remote; 16" and 64") and **lateral** (A, M, N on the sonde, B remote) |
+| ERT geometric factor | analytic half-space formula | calibrated like a real tool: the sonde reads the true resistivity in a homogeneous earth |
+| EM tool | two-coil pair | two-coil pair and a **focused** tool with a bucking receiver |
+
+Settings (top of the script):
+
+| Setting | Meaning |
+|---|---|
+| `TOOL_DIAM` | Diameter of the insulating ERT tool body (m); `None` = no tool body. |
+| `NORMAL_SPACINGS` | AM distances of the normal arrays (m). Default 16" (0.41 m) and 64" (1.63 m). |
+| `LATERAL_SPACINGS`, `LATERAL_MN` | AO distance(s) (A to the midpoint of MN) and MN distance of the lateral (m). The defaults are an example; the classic oilfield lateral is AO = 5.69 m (18'8"), MN = 0.81 m. |
+| `ERT_MEAS_SPACING` | Tool step along the hole (m). |
+| `EM_COIL_SPACINGS`, `EM_BUCKING` | Main transmitter–receiver distance per EM tool, and the bucking receiver distance for each (`None` = plain two-coil). |
+| `LAYERS`, `BOREHOLE_*`, `BACKFILL_SWEEP`, `EM_FREQUENCIES`, `OUTPUT_DIR` | As in `run_combined.py`. |
+
+With the defaults it takes about **30 minutes and up to ~17 GB of RAM**: ring electrodes on a tool body need a finer ERT mesh (~1.2M cells). Setting `ERT_MEAS_SPACING = 0.2` roughly halves both.
+
+Outputs in `results/`: `realistic_log_backfill_<rho>.png` (all tool logs for each backfill, dotted = no borehole) and `realistic_backfill_effect.png` (with-hole / no-hole ratio per tool), plus a printed summary table.
+
+Replace the example spacings and tool diameter with those of your sondes. The physics of these tools is described in [docs/user_guide.md](docs/user_guide.md#realistic-tools).
+
+---
+
 ## Using the classes directly
 
 `run_combined.py` is built on two classes you can also use on their own:
@@ -176,12 +206,16 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 | EM coaxial coils in a full space (1–100 Ohm.m), 400 and 8000 Hz | analytic dipole field | quadrature and apparent resistivity within ~1.5% |
 | EM coaxial coils in a 0.2 m borehole, backfill 1–1000 Ohm.m | Fourier–Bessel solution for an infinite borehole | quadrature within 0.1–1.7% (cylindrical), 0.1–1.5% (3D octree) |
 | EM coplanar coils in a full space, 3D octree | analytic dipole field | within 0.7% |
+| ERT normal (16", 64") and lateral on the axis, 1 Ohm.m backfill | Fourier–Bessel solution | within 0.3% |
+| ERT ring electrodes on a 50 mm insulating tool, normal and lateral, backfill 1 and 1000 Ohm.m | Fourier–Bessel solution with a mandrel | within 0.3% |
+| EM focused tool (bucking receiver), backfill 1–1000 Ohm.m | Fourier–Bessel solution | within 0.2–1.3% |
 
 ## Limitations
 
 - The borehole is vertical and the layers are horizontal.
-- The ERT tool sits on the borehole axis. The EM tool can be off-centre (`tool_offset`, 3D octree mesh). The tool body (mandrel) is not modelled.
-- ERT uses a Wenner-type array (any A, B, M, N order on equally spaced electrodes). Normal and lateral arrays are not implemented yet.
+- The ERT tool is centred in the hole; its body is an insulating cylinder over the whole borehole length (the real sonde is a few metres long, with a thinner cable above). The EM tool can be off-centre (`tool_offset`, 3D octree mesh).
+- Ring electrodes are modelled as the average over 4 points around the tool, which is exact for a centred tool (checked against the analytic solution); remote electrodes are ideal poles at infinity.
+- Focused induction tools are represented by one bucking receiver per coil pair; commercial tools use their own (often proprietary) coil sets.
 - The default EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree solver handles off-centre tools and transverse coils but takes ~10 s per tool position and frequency, so it is meant for selected depths rather than full logs.
 - EM `real`, `amplitude` and `phase` are not meaningful at these low induction numbers (the in-phase secondary field is ~1e-8 of the primary); use the quadrature (`imag`) or the apparent resistivity.
 
@@ -189,6 +223,7 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 
 ```
 run_combined.py               main script: ERT + EM backfill study  <- start here
+run_realistic.py              the same study with realistic tools (tool body, normal/lateral, focused EM)
 geometry_class/
     geometry.py               ERT: 3D mesh, electrodes, PyGIMLi forward model
     em_geometry.py            EM: cylindrical / octree mesh, SimPEG forward model

@@ -33,6 +33,43 @@ def _polygon_radius(r: float, n_segments: int) -> float:
     return r * np.sqrt(np.pi / (0.5 * n_segments * np.sin(2.0 * np.pi / n_segments)))
 
 
+def merge_protocols(*datas: pg.DataContainerERT) -> pg.DataContainerERT:
+    """Merge ERT protocols built on the same PLC into one (shared sensors are deduplicated).
+
+    Simulating one merged protocol costs one forward run instead of one per
+    protocol.  The column ``protocol`` holds the index of the source protocol;
+    ``depthref`` and ``spacing`` are carried over when present.
+    """
+    positions, index = [], {}
+    cols = {k: [] for k in ("a", "b", "m", "n", "protocol", "depthref", "spacing")}
+    for p_i, d in enumerate(datas):
+        sensor = {}
+        for i in range(d.sensorCount()):
+            pos = d.sensorPosition(i)
+            key = tuple(round(float(pos[c]), 6) for c in range(3))
+            if key not in index:
+                index[key] = len(positions)
+                positions.append(list(key))
+            sensor[i] = index[key]
+        tokens = d.tokenList()
+        for j in range(d.size()):
+            for k in "abmn":
+                e = int(d(k)[j])
+                cols[k].append(-1 if e < 0 else sensor[e])
+            cols["protocol"].append(p_i)
+            for k in ("depthref", "spacing"):
+                cols[k].append(float(d[k][j]) if k in tokens else np.nan)
+    out = pg.DataContainerERT()
+    out.setSensorPositions(positions)
+    out.resize(len(cols["a"]))
+    for k in "abmn":
+        out.set(k, cols[k])
+    out.set("valid", np.ones(len(cols["a"]), dtype=int))
+    for k in ("protocol", "depthref", "spacing"):
+        out[k] = np.array(cols[k], dtype=float)
+    return out
+
+
 @dataclass
 class Geometry:
     """
@@ -72,6 +109,13 @@ class Geometry:
             tetrahedron volumes (m^3) per zone; defaults follow from the zone sizes.
         p2 (bool): Use quadratic (P2) elements.  Strongly recommended: P1 leaves a
             few-percent bias for high borehole/formation contrasts.
+        tool_diameter (Optional[float]): Diameter of an insulating tool body (mandrel) centred
+            in the hole, over the full borehole length.  Electrodes then sit on its surface
+            and the geometric factor is calibrated numerically (see ``run``).
+        tool_resistivity (float): Resistivity of the tool body (Ohm.m).
+        ring_azimuths (int): With a tool body, electrodes are rings: the measured potential
+            is averaged over this many points around the tool (1 = point electrodes).
+            Point electrodes are up to ~20 % off for short spacings in resistive backfill.
     """
     borehole_length: float
     borehole_diameter: float
@@ -91,6 +135,9 @@ class Geometry:
     mid_area: Optional[float] = None
     world_area: float = 0.0
     p2: bool = True
+    tool_diameter: Optional[float] = None
+    tool_resistivity: float = 1e6
+    ring_azimuths: int = 4
     _regions: Dict[int, Tuple[float, float]] = field(default_factory=dict, init=False, repr=False)  # marker -> (r, depth)
     _p2_cache: tuple = field(default=(None, None), init=False, repr=False)
 
@@ -111,6 +158,14 @@ class Geometry:
                                 self.backfill_resistivity, self.borehole_zones)
 
         radius = self.borehole_diameter / 2.0
+        self.tool_radius = None
+        if self.ring_azimuths < 1:
+            raise ValueError("ring_azimuths must be >= 1.")
+        if self.tool_diameter is not None:
+            self.tool_radius = self.tool_diameter / 2.0
+            if not (0.0 < self.tool_radius < self.zones[0].r_outer):
+                raise ValueError("tool_diameter must be positive and smaller than the innermost "
+                                 "borehole zone diameter.")
         if self.near_radius is None:
             self.near_radius = 10.0 * radius
         if self.mid_radius is None:
@@ -148,9 +203,17 @@ class Geometry:
             self.rhomap = self._rhomap()
 
     def resistivity_at(self, r, depth, include_borehole: bool = True) -> np.ndarray:
-        """Resistivity at (r, depth) for this model (depth positive downward)."""
-        return resistivity_rz(r, depth, self.layer_1d_geometry, self.background_resistivity,
-                              self.zones, include_borehole)
+        """Resistivity at (r, depth) for this model (depth positive downward).
+
+        The tool body is part of the measurement, not of the borehole, so it is
+        kept in the ``include_borehole=False`` reference.
+        """
+        rho = resistivity_rz(r, depth, self.layer_1d_geometry, self.background_resistivity,
+                             self.zones, include_borehole)
+        if self.tool_radius is not None:
+            r, depth = np.broadcast_arrays(np.atleast_1d(r), np.atleast_1d(depth))
+            rho[(r < self.tool_radius) & (depth >= 0.0) & (depth < self.borehole_length)] = self.tool_resistivity
+        return rho
 
     def make_basic_geometry(self, vtk_filename: str = "plc.vtk") -> pg.core.Mesh:
         """
@@ -176,44 +239,66 @@ class Geometry:
         levels = np.array(sorted(d for d in levels if 0.0 <= d <= self.world_depth))
         levels = levels[np.concatenate([[True], np.diff(levels) > 1e-6])]
 
-        radii = [z.r_outer for z in self.zones] + [self.near_radius, self.mid_radius, self.world_radius]
-        poly_radii = [_polygon_radius(r, n) for r in radii]
-        n_zones, last_j = len(self.zones), len(radii) - 1
+        inner = ([self.tool_radius] if self.tool_radius is not None else []) + [z.r_outer for z in self.zones]
+        radii = inner + [self.near_radius, self.mid_radius, self.world_radius]
+        # Sides per ring: a thin tool body gets n/3 sides so its facets are not
+        # millimetre-wide strips along the whole hole (which made TetGen fill the
+        # annulus with ~10^6 cells); every count divides the next ring's count.
+        n_sides = [n] * len(radii)
+        if self.tool_radius is not None and n % 3 == 0 and n >= 24:
+            n_sides[0] = n // 3
+        poly_radii = [_polygon_radius(r, m) for r, m in zip(radii, n_sides)]
+        n_zones, last_j = len(inner), len(radii) - 1
+        self._levels = levels
+        self._tool_poly_radius = poly_radii[0] if self.tool_radius is not None else None
+        self._n_tool_sides = n_sides[0]
 
-        # The inner rings stop at the bottom of the refined column; below it only
-        # the world ring remains (otherwise TetGen fills thin, deep columns with
-        # tiny tetrahedra).  present[k] = rings existing at level k.
-        present = [list(range(len(radii))) if d <= refined_bottom + 1e-9 else [last_j] for d in levels]
+        # Rings only exist where they are needed (otherwise TetGen fills thin, deep
+        # columns with tiny tetrahedra): borehole rings down to the borehole bottom,
+        # near/mid rings down to the end of the refined column, the world ring
+        # everywhere.  present[k] = rings existing at level k.
+        limit = [L] * n_zones + [refined_bottom, refined_bottom, np.inf]
+        present = [[j for j in range(len(radii)) if d <= limit[j] + 1e-9] for d in levels]
 
         plc = pg.Mesh(3, isGeometry=True)
-        ang = 2.0 * np.pi * np.arange(n) / n
         centre, rings = [], []
         for k, d in enumerate(levels):
             centre.append(plc.createNode([0.0, 0.0, -d]))
             rings.append({j: [plc.createNode([poly_radii[j] * np.cos(a), poly_radii[j] * np.sin(a), -d])
-                              for a in ang] for j in present[k]})
+                              for a in 2.0 * np.pi * np.arange(n_sides[j]) / n_sides[j]]
+                          for j in present[k]})
 
         last_k = len(levels) - 1
         for k in range(len(levels)):
             marker = int(BoundaryMarkers.NEUMANN if k == 0
                          else BoundaryMarkers.ROBIN if k == last_k else BoundaryMarkers.INTERNAL)
             js = present[k]
-            for i in range(n):
-                i1 = (i + 1) % n
-                # Triangle fan around the axis node, so the electrode line meets the plane at a vertex
-                plc.createTriangleFace(centre[k], rings[k][js[0]][i], rings[k][js[0]][i1], marker)
-                for j0, j1 in zip(js[:-1], js[1:]):
-                    plc.createQuadrangleFace(rings[k][j0][i], rings[k][j0][i1],
-                                             rings[k][j1][i1], rings[k][j1][i], marker)
+            ring0 = rings[k][js[0]]
+            for i in range(len(ring0)):
+                # Triangle fan around the axis node, so the axis meets the plane at a vertex
+                plc.createTriangleFace(centre[k], ring0[i], ring0[(i + 1) % len(ring0)], marker)
+            for j0, j1 in zip(js[:-1], js[1:]):
+                a, b = rings[k][j0], rings[k][j1]
+                ratio = len(b) // len(a)
+                for i in range(len(a)):
+                    i1 = (i + 1) % len(a)
+                    if ratio == 1:
+                        plc.createQuadrangleFace(a[i], a[i1], b[i1], b[i], marker)
+                        continue
+                    # Coarser inner ring: fan from a[i] over its outer arc, then close to a[i+1]
+                    for t in range(ratio):
+                        plc.createTriangleFace(a[i], b[i * ratio + t], b[(i * ratio + t + 1) % len(b)], marker)
+                    plc.createTriangleFace(a[i], b[(i1 * ratio) % len(b)], a[i1], marker)
         for k in range(len(levels) - 1):
             for j in present[k + 1]:
                 marker = int(BoundaryMarkers.ROBIN if j == last_j else BoundaryMarkers.INTERNAL)
-                for i in range(n):
-                    i1 = (i + 1) % n
-                    plc.createQuadrangleFace(rings[k][j][i], rings[k][j][i1],
-                                             rings[k + 1][j][i1], rings[k + 1][j][i], marker)
+                top, bot = rings[k][j], rings[k + 1][j]
+                for i in range(len(top)):
+                    i1 = (i + 1) % len(top)
+                    plc.createQuadrangleFace(top[i], top[i1], bot[i1], bot[i], marker)
 
-        # One region per (ring slot, slab); marker placed mid-slot on the polygon's bisector
+        # One region per (ring slot, slab), its marker placed between the inner
+        # polygon's corners and the outer polygon's edge midpoints
         self._regions = {}
         self._zone_markers = set()
         marker = 0
@@ -225,8 +310,10 @@ class Geometry:
                 r_in = radii[j_in] if j_in is not None else 0.0
                 rp_in = poly_radii[j_in] if j_in is not None else 0.0
                 r_mid = 0.5 * (r_in + radii[j])
-                rp_mid = 0.5 * (rp_in + poly_radii[j]) * np.cos(np.pi / n)
-                if j < n_zones:
+                rp_mid = 0.5 * (rp_in + poly_radii[j] * np.cos(np.pi / n_sides[j]))
+                if self.tool_radius is not None and j == 0:
+                    area = self.near_area          # inside the insulating tool body
+                elif j < n_zones:
                     area = self.borehole_area
                 elif j == last_j or len(js) == 1:
                     area = self.world_area
@@ -238,8 +325,7 @@ class Geometry:
                 self._regions[marker] = (r_mid, d_mid)
                 if j < n_zones:
                     self._zone_markers.add(marker)
-                plc.addRegionMarker([rp_mid * np.cos(np.pi / n), rp_mid * np.sin(np.pi / n), -d_mid],
-                                    marker=marker, area=area)
+                plc.addRegionMarker([rp_mid, 0.0, -d_mid], marker=marker, area=area)
 
         if vtk_filename:
             plc.exportVTK(vtk_filename)
@@ -280,48 +366,19 @@ class Geometry:
             warnings.warn(f"long_spacing={long_spacing} exceeds Geometry.long_spacing="
                           f"{self.long_spacing}; the refined mid zone may be too small.")
 
-        interfaces = self._interface_depths()
-        on_interface = lambda depths: [d for d in depths if np.any(np.abs(interfaces - d) < 1e-6)]
         grid = lambda off: off + measuring_spacing * np.arange(
             int(np.floor((self.borehole_length - off) / measuring_spacing + 1e-9)) + 1)
-        if electrode_offset is None:
-            electrode_offset = 0.0
-            if on_interface(grid(0.0)):
-                electrode_offset = 0.5 * measuring_spacing
-                warnings.warn(f"Electrodes would sit on layer/zone interfaces; electrode grid "
-                              f"shifted by {electrode_offset:g} m.")
+        electrode_offset = self._choose_offset(grid, measuring_spacing, electrode_offset)
         depths = grid(electrode_offset)
-        clash = on_interface(depths)
-        if clash:
-            warnings.warn(f"Electrodes at depths {clash} sit on a resistivity interface; "
-                          "results there converge poorly.")
+        if self.tool_radius is not None:
+            depths = depths[(depths > 0.0) & (depths < self.borehole_length)]
         z_positions = -depths
 
-        # Small spacings need borehole cells no larger than the spacing
-        h_bh = (self.borehole_area * 6.0 * np.sqrt(2.0)) ** (1.0 / 3.0)
-        if self._auto_borehole_area and short_spacing < h_bh:
-            self.borehole_area = short_spacing**3 / (6.0 * np.sqrt(2.0))
-            for rm in geom.regionMarkers():
-                if rm.marker() in self._zone_markers:
-                    rm.setArea(self.borehole_area)
-
-        # Electrodes are PLC nodes on the borehole axis (reusing the plane-centre
-        # nodes where they coincide) ...
-        for z in z_positions:
-            geom.createNodeWithCheck([0.0, 0.0, z]).setMarker(ELECTRODE_NODE_MARKER)
-
-        # ... chained by edges through every axis node inside the borehole, which
-        # forces TetGen to keep them and refines the mesh along the tool path
-        axis = sorted((nd for nd in geom.nodes()
-                       if abs(nd.pos()[0]) < 1e-9 and abs(nd.pos()[1]) < 1e-9
-                       and -self.borehole_length - 1e-9 <= nd.pos()[2] <= 1e-9),
-                      key=lambda nd: -nd.pos()[2])
-        for n0, n1 in zip(axis[:-1], axis[1:]):
-            geom.createEdge(n0, n1)
+        self._refine_for_spacing(geom, short_spacing)
 
         # Create the ERT DataContainer
         data = pg.DataContainerERT()
-        data.setSensorPositions([[0.0, 0.0, z] for z in z_positions])
+        data.setSensorPositions(self._add_electrode_nodes(geom, depths))
 
         # Map A, B, M, N to their relative index positions (0-based)
         a_pos, b_pos, m_pos, n_pos = [idx - 1 for idx in abmn_order]
@@ -357,6 +414,164 @@ class Geometry:
         if protocol_filename:
             data.save(protocol_filename)
 
+        return data
+
+    # ------------------------------------------------------------------
+    def _avoid_depths(self) -> Tuple[np.ndarray, float]:
+        """Depths electrodes must not sit on, and the minimum distance to keep."""
+        if self.tool_radius is not None:
+            # Off-axis electrodes may not touch any horizontal plane of the PLC
+            return np.asarray(self._levels), 1e-3
+        return self._interface_depths(), 1e-6
+
+    def _choose_offset(self, make_depths, step: float, electrode_offset: Optional[float]) -> float:
+        """Pick an electrode-grid offset so that no electrode sits on an interface."""
+        avoid, tol = self._avoid_depths()
+        clash = lambda off: [d for d in make_depths(off) if np.any(np.abs(avoid - d) < tol)]
+        if electrode_offset is not None:
+            if clash(electrode_offset):
+                warnings.warn(f"Electrodes at depths {clash(electrode_offset)} sit on a resistivity "
+                              "interface; results there converge poorly.")
+            return electrode_offset
+        for frac in (0.0, 0.5, 0.25, 0.75, 0.125, 0.375):
+            if not clash(frac * step):
+                if frac:
+                    warnings.warn(f"Electrodes would sit on layer/zone interfaces; electrode grid "
+                                  f"shifted by {frac * step:g} m.")
+                return frac * step
+        warnings.warn("Could not keep all electrodes off interfaces; pass electrode_offset.")
+        return 0.0
+
+    def _refine_for_spacing(self, geom: pg.core.Mesh, short_spacing: float):
+        """Small spacings need borehole cells no larger than the spacing."""
+        h_bh = (self.borehole_area * 6.0 * np.sqrt(2.0)) ** (1.0 / 3.0)
+        if self._auto_borehole_area and short_spacing < h_bh:
+            self.borehole_area = short_spacing**3 / (6.0 * np.sqrt(2.0))
+            for rm in geom.regionMarkers():
+                if rm.marker() in self._zone_markers:
+                    rm.setArea(self.borehole_area)
+
+    def _add_electrode_nodes(self, geom: pg.core.Mesh, depths) -> List[List[float]]:
+        """Add electrode nodes to the PLC and return their positions.
+
+        Without a tool body the electrodes are on the borehole axis, chained by
+        edges through every axis node (reusing the plane-centre nodes), which
+        forces TetGen to keep them and refines the mesh along the tool path.
+        With a tool body they sit in the backfill, 2 mm (at most) from the tool
+        surface; a point electrode there stands in for a ring electrode.
+        """
+        if self.tool_radius is None:
+            positions = [[0.0, 0.0, -d] for d in depths]
+            for pos in positions:
+                geom.createNodeWithCheck(pos).setMarker(ELECTRODE_NODE_MARKER)
+            axis = sorted((nd for nd in geom.nodes()
+                           if abs(nd.pos()[0]) < 1e-9 and abs(nd.pos()[1]) < 1e-9
+                           and -self.borehole_length - 1e-9 <= nd.pos()[2] <= 1e-9),
+                          key=lambda nd: -nd.pos()[2])
+            for n0, n1 in zip(axis[:-1], axis[1:]):
+                geom.createEdge(n0, n1)
+            return positions
+
+        gap = min(2e-3, 0.1 * (_polygon_radius(self.zones[0].r_outer, self.n_segments) - self._tool_poly_radius))
+        self._electrode_radius = self._tool_poly_radius + gap
+        positions = [[self._electrode_radius, 0.0, -d] for d in depths]
+        for d in depths:
+            for x, y in self._ring_xy():
+                geom.createNodeWithCheck([x, y, -d]).setMarker(ELECTRODE_NODE_MARKER)
+        return positions
+
+    def _ring_xy(self) -> np.ndarray:
+        """(x, y) of the ring sample points: tool-polygon corner directions, evenly spread."""
+        n_tool = self._n_tool_sides
+        if n_tool % self.ring_azimuths:
+            raise ValueError(f"ring_azimuths must divide the {n_tool} sides of the tool polygon.")
+        ang = 2.0 * np.pi * np.arange(self.ring_azimuths) / self.ring_azimuths
+        return np.column_stack([self._electrode_radius * np.cos(ang), self._electrode_radius * np.sin(ang)])
+
+    def make_tool_array(
+        self,
+        geom: pg.core.Mesh,
+        array: str = "normal",
+        spacings=(0.4064, 1.6256),
+        measuring_spacing: float = 0.1,
+        mn_spacing: float = 0.8128,
+        electrode_offset: Optional[float] = None,
+        protocol_filename: Optional[str] = None,
+    ) -> pg.DataContainerERT:
+        """
+        Logging-tool arrays with remote electrodes, moved along the borehole.
+
+        * ``"normal"``: current electrode A and potential electrode M on the sonde,
+          M above A at distance AM (``spacings``, e.g. 16" = 0.4064 m and
+          64" = 1.6256 m); B and N are remote (pole-pole).  Depth reference: AM midpoint.
+        * ``"lateral"``: A on the sonde, M and N above it, centred at distance AO
+          (``spacings``, e.g. 18'8" = 5.69 m) and ``mn_spacing`` apart
+          (32" = 0.8128 m); B is remote (pole-dipole).  Depth reference: O.
+
+        Remote electrodes are true poles ("at infinity"); with a tool body the
+        geometric factor is calibrated numerically in ``run``.  The data
+        container gets two extra columns: ``depthref`` (m) and ``spacing`` (m).
+
+        Args:
+            geom (pg.core.Mesh): The PLC from ``make_basic_geometry``.
+            array (str): ``"normal"`` or ``"lateral"``.
+            spacings: AM (normal) or AO (lateral) values in m.
+            measuring_spacing (float): Step of the tool along the hole (m).
+            mn_spacing (float): MN distance of the lateral (m).
+            electrode_offset (Optional[float]): Depth offset of the station grid;
+                ``None`` = chosen so that no electrode sits on an interface.
+            protocol_filename (Optional[str]): Save the protocol to this file.
+
+        Returns:
+            pg.DataContainerERT: The protocol.
+        """
+        array = array.lower()
+        if array not in ("normal", "lateral"):
+            raise ValueError("array must be 'normal' or 'lateral'.")
+        spacings = [float(x) for x in np.atleast_1d(spacings)]
+        if max(spacings) > self.long_spacing * (1 + 1e-9):
+            warnings.warn(f"Spacing {max(spacings)} m exceeds Geometry.long_spacing="
+                          f"{self.long_spacing}; set long_spacing to it so the refined zone is large enough.")
+        L = self.borehole_length
+
+        def configs(off):
+            """(spacing, depth A, depth M, depth N or None, depth reference) per measurement."""
+            out = []
+            a_depths = off + measuring_spacing * np.arange(int(np.floor((L - off) / measuring_spacing + 1e-9)) + 1)
+            for sp in spacings:
+                for da in a_depths:
+                    if array == "normal":
+                        dm, dn, ref = da - sp, None, da - sp / 2.0
+                    else:
+                        dm, dn, ref = da - sp + mn_spacing / 2.0, da - sp - mn_spacing / 2.0, da - sp
+                    top = dm if dn is None else dn
+                    if top > 1e-3 and da < L - 1e-3:
+                        out.append((sp, da, dm, dn, ref))
+            return out
+
+        all_depths = lambda off: sorted({round(d, 6) for c in configs(off) for d in c[1:4] if d is not None})
+        electrode_offset = self._choose_offset(all_depths, measuring_spacing, electrode_offset)
+        cfg = configs(electrode_offset)
+        if not cfg:
+            raise ValueError("No tool position fits in the borehole with these spacings.")
+        depths = np.array(all_depths(electrode_offset))
+        index = {round(d, 6): i for i, d in enumerate(depths)}
+
+        self._refine_for_spacing(geom, min(min(spacings), mn_spacing if array == "lateral" else np.inf))
+
+        data = pg.DataContainerERT()
+        data.setSensorPositions(self._add_electrode_nodes(geom, depths))
+        data.resize(len(cfg))
+        data.set("a", [index[round(c[1], 6)] for c in cfg])
+        data.set("b", [-1] * len(cfg))
+        data.set("m", [index[round(c[2], 6)] for c in cfg])
+        data.set("n", [-1 if c[3] is None else index[round(c[3], 6)] for c in cfg])
+        data.set("valid", np.ones(len(cfg), dtype=int))
+        data["depthref"] = np.array([c[4] for c in cfg])
+        data["spacing"] = np.array([c[0] for c in cfg])
+
+        if protocol_filename:
+            data.save(protocol_filename)
         return data
 
     def make_mesh(self, geom: pg.core.Mesh, vtk_filename: str = "mesh.vtk", quality: float = 1.3) -> pg.core.Mesh:
@@ -492,7 +707,29 @@ class Geometry:
 
         print(f"Simulating ERT data ({'P2' if self.p2 else 'P1'}, "
               f"{'with' if include_borehole else 'without'} borehole)...")
-        sim_data = ert.simulate(
+        if self.tool_radius is None:
+            sim_data = self._simulate(fwd_mesh, data, res, noise_level, noise_abs)
+        else:
+            # Ring electrodes on the tool body; tool constant k such that a
+            # homogeneous earth (with the tool) reads its true resistivity
+            r = self._ring_resistances(fwd_mesh, data, res)
+            k = self._tool_constant(mesh, fwd_mesh, data)
+            rhoa = k * r
+            if noise_level > 0 or noise_abs > 0:
+                rhoa = rhoa * (1.0 + noise_level * np.random.randn(len(rhoa))) \
+                    + noise_abs * k * np.random.randn(len(rhoa))
+            sim_data = pg.DataContainerERT(data)
+            sim_data["r"], sim_data["k"], sim_data["rhoa"] = r, k, rhoa
+            sim_data["valid"] = np.ones(len(r))
+
+        if output_filename:
+            sim_data.save(output_filename)
+
+        return sim_data
+
+    @staticmethod
+    def _simulate(fwd_mesh, data, res, noise_level=0.0, noise_abs=0.0):
+        return ert.simulate(
             mesh=fwd_mesh,
             scheme=pg.DataContainerERT(data),
             res=pg.Vector(res),
@@ -502,10 +739,65 @@ class Geometry:
             verbose=False,
         )
 
-        if output_filename:
-            sim_data.save(output_filename)
+    def _ring_resistances(self, fwd_mesh, data, res) -> np.ndarray:
+        """Transfer resistances (V/A) between ring electrodes on the tool body.
 
-        return sim_data
+        Solves only for the current electrodes A (one FE solve each; PyGIMLi's
+        ``simulate`` would also solve for every potential electrode) and reads
+        the potentials at the measuring nodes.  The model is axisymmetric, so
+        the ring-to-ring resistance is the average over the ring points of M
+        (and N) for a point source A.
+        """
+        pos = np.array([list(data.sensorPosition(i)) for i in range(data.sensorCount())])
+        a_idx = np.array(data("a"), dtype=int)
+        if np.any(np.array(data("b"), dtype=int) >= 0):
+            raise ValueError("Tool-body arrays need a remote B electrode (b = -1).")
+        sources = sorted(set(a_idx))
+        src_row = {s: i for i, s in enumerate(sources)}
+
+        ds = pg.DataContainerERT()
+        ds.setSensorPositions(pos[sources].tolist())
+        ds.resize(len(sources))
+        ds.set("a", np.arange(len(sources)))
+        ds.set("m", (np.arange(len(sources)) + 1) % len(sources) if len(sources) > 1 else [-1])
+        ds.set("b", [-1] * len(sources))
+        ds.set("n", [-1] * len(sources))
+        ds.set("valid", np.ones(len(sources)))
+        fop = ert.ERTModelling(sr=True, verbose=False)
+        fop.setData(ds)
+        fop.setMesh(fwd_mesh, ignoreRegionManager=True)
+        fop.response(pg.Vector(res))
+        sol = np.array(fop.solution())          # (n_sources, n_nodes), unit current
+
+        ring = self._ring_xy()
+        node_cache = {}
+
+        def ring_nodes(sensor):
+            if sensor not in node_cache:
+                z = pos[sensor, 2]
+                node_cache[sensor] = [fwd_mesh.findNearestNode([x, y, z]) for x, y in ring]
+            return node_cache[sensor]
+
+        r = np.zeros(data.size())
+        for j, (a, m, n) in enumerate(zip(a_idx, np.array(data("m"), dtype=int), np.array(data("n"), dtype=int))):
+            u = sol[src_row[a]]
+            r[j] = u[ring_nodes(m)].mean() - (u[ring_nodes(n)].mean() if n >= 0 else 0.0)
+        return r
+
+    def _tool_constant(self, mesh, fwd_mesh, data) -> np.ndarray:
+        """Numerical geometric factor: 1 / R for a 1 Ohm.m homogeneous earth with the tool body."""
+        key = (id(mesh), data.size(),
+               tuple(np.array(data("a"))), tuple(np.array(data("m"))), tuple(np.array(data("n"))))
+        cache = getattr(self, "_k_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        r, d = np.array([self._regions[m] for m in mesh.cellMarkers()]).T
+        in_tool = (r < self.tool_radius) & (d >= 0.0) & (d < self.borehole_length)
+        res_cal = np.where(in_tool, self.tool_resistivity, 1.0)
+        print("Calibrating the tool constant (homogeneous 1 Ohm.m earth with tool body)...")
+        k = 1.0 / self._ring_resistances(fwd_mesh, data, res_cal)
+        self._k_cache = (key, k)
+        return k
 
     def plot_model_and_data(self, data: pg.DataContainerERT):
         """
@@ -580,7 +872,7 @@ class Geometry:
         a_spacings = [abs(sorted([z_A[i], z_B[i], z_M[i], z_N[i]])[1] - sorted([z_A[i], z_B[i], z_M[i], z_N[i]])[0]) for i in range(data.size())]
         a_spacings = np.round(a_spacings, decimals=2)
 
-        rho_a = np.array(data("rhoa")) if "rhoa" in data.tokenList() else np.array(data("r") * data("k"))
+        rho_a = np.array(data["rhoa"]) if "rhoa" in data.tokenList() else np.array(data["r"]) * np.array(data["k"])
         unique_a = np.unique(a_spacings)
 
         if len(unique_a) > 0:

@@ -101,6 +101,9 @@ The order matters: electrodes are added to the geometry before meshing, so every
 | `borehole_area`, `near_area`, `mid_area` | from the zone sizes | Maximum tetrahedron volume (m³) in each zone. |
 | `world_area` | 0 | Maximum volume in the far field; 0 = no limit. |
 | `p2` | `True` | Quadratic elements. Keep `True` (see §5). |
+| `tool_diameter` | `None` | Diameter of an insulating tool body (m), centred, over the whole borehole length. Electrodes then become rings on its surface and the geometric factor is calibrated (see [Realistic tools](#realistic-tools)). |
+| `tool_resistivity` | 1e6 | Resistivity of the tool body (Ohm.m). |
+| `ring_azimuths` | 4 | Points around the tool averaged to form a ring electrode; 1 = point electrodes (up to ~20% off for short spacings in resistive backfill). Must divide the 8 sides of the tool polygon. |
 
 ### Methods
 
@@ -108,6 +111,8 @@ The order matters: electrodes are added to the geometry before meshing, so every
 |---|---|
 | `make_basic_geometry(vtk_filename="plc.vtk")` | Builds the geometry: concentric polygons (borehole zones → near zone → mid zone → world) cut by horizontal planes at every layer interface, zone top/bottom and the borehole bottom. Each piece is its own region. Pass `vtk_filename=None` to skip the VTK file. |
 | `make_array(geom, abmn_order, short_spacing, long_spacing, measuring_spacing, protocol_filename="protocol.dat", electrode_offset=None)` | Puts electrodes every `measuring_spacing` along the axis, starting at depth `electrode_offset`, and builds the protocol for the two spacings. `abmn_order` gives the positions of A, B, M, N in the array, e.g. `(1, 4, 2, 3)` = Wenner A–M–N–B. By default the first electrode is at 0, unless the grid would put an electrode exactly on a layer interface, zone boundary or the borehole bottom: then the grid is shifted by half a step (with a warning), because a point electrode on a resistivity jump converges poorly. If `short_spacing` is smaller than the borehole cell size, the borehole cells are refined to match. Returns a `pg.DataContainerERT`. |
+| `make_tool_array(geom, array="normal", spacings=(0.4064, 1.6256), measuring_spacing=0.1, mn_spacing=0.8128, electrode_offset=None, protocol_filename=None)` | Logging arrays with remote electrodes. `"normal"`: A and M on the sonde (M above A at distance AM), B and N remote. `"lateral"`: A on the sonde, M and N above it centred at distance AO and `mn_spacing` apart, B remote. Adds the columns `depthref` (AM midpoint for the normal, O for the lateral) and `spacing`. |
+| `merge_protocols(*datas)` (module function) | Merges protocols built on the same geometry into one, so they are simulated in a single run; adds a `protocol` column with the index of the source protocol. |
 | `make_mesh(geom, vtk_filename="mesh.vtk", quality=1.3)` | Runs TetGen and sets the boundary markers. `quality` is TetGen's radius–edge ratio; keep 1.2–1.4. |
 | `run(mesh, data, rhomap=None, output_filename="simulated_data.dat", noise_level=0, noise_abs=0, include_borehole=True)` | Forward model. Returns a data container with `rhoa` (apparent resistivity), `r` (resistance) and `k` (geometric factor). `include_borehole=False` replaces the hole by formation. |
 | `set_borehole(backfill_resistivity=None, borehole_zones=None)` | Changes the borehole resistivities on the existing mesh. The zone radii and depths must stay the same. |
@@ -164,6 +169,7 @@ log3d = em3d.run(depths=[2.0, 7.0, 12.0])
 | `pad_factor` | 1.4 | Growth factor of the padding cells. |
 | `n_padding` | 10 | Sets the number of uniform cells above the surface (`n_padding // 4`). |
 | `n_theta_cells` | 1 | Azimuthal cells of the cylindrical mesh; 1 is exact for coaxial coils. |
+| `bucking_spacings` | `None` | One entry per coil spacing: the distance of a bucking receiver from the transmitter (m, smaller than the spacing) or `None` for a plain two-coil pair. See [Realistic tools](#realistic-tools). |
 
 ### Output of `run()`
 
@@ -174,6 +180,7 @@ A pandas DataFrame with one row per tool position, coil spacing and frequency:
 | `depth` | Tool centre: midpoint between transmitter and receiver (m). |
 | `tx_depth` | Transmitter depth (m). |
 | `spacing` | Coil spacing (m). |
+| `bucking` | Bucking receiver distance (m), NaN for a two-coil pair. Fields and apparent resistivities are those of the combined array. |
 | `frequency` | Frequency (Hz). |
 | `real`, `imag` | Secondary magnetic field H (A/m) for a unit-moment transmitter. |
 | `amplitude`, `phase` | Magnitude (A/m) and phase (degrees) of the secondary field. |
@@ -270,6 +277,22 @@ Checks: centred tool in a borehole within 0.1–1.5% of the analytic solution; c
 | 8 cm (2 cm from the wall) | 45.6 | 73.0 |
 
 Off-centre, the eddy-current loops around the tool axis cross the wall; charge builds up on it and blocks part of the current in the backfill. The geometric-factor (Doll) picture, which has no such charges, predicts almost no change, and that is indeed what the 3D solver gives for a weak contrast (50 vs 100 Ohm.m: 95.5 → 96.2 Ohm.m).
+
+### Realistic tools
+
+`run_realistic.py` uses the following options.
+
+**Tool body.** `Geometry(tool_diameter=...)` puts an insulating cylinder in the middle of the hole. It is kept in the no-borehole reference, because it is part of the tool. The tool polygon has 8 sides (area-corrected): with 24 sides its millimetre-wide facets running the whole hole made TetGen generate ~10⁶ extra cells.
+
+**Ring electrodes.** Real sonde electrodes are metal rings, equipotential all the way round. A single point electrode on the tool surface is a poor stand-in when the backfill is resistive: with 1000 Ohm.m backfill, the potential 0.2 m away on the far side of the tool was 21% lower than on the near side, because the current hardly spreads around the tool in a thin resistive annulus. For a centred tool the model is axisymmetric, so a ring-to-ring resistance equals the average, over points around M, of the resistance from one point at A. The code samples 4 points around the tool. Instead of PyGIMLi's `simulate` (which solves once per electrode, used or not), it solves only for the current electrodes and reads the potentials at the measuring points.
+
+**Normal and lateral arrays.** In a *normal* (A–M on the sonde, B and N "at infinity") the measurement is the potential at M; the depth of investigation is about 2 × AM and the response is symmetric. A *lateral* (A on the sonde, M and N close together at distance AO, B at infinity) measures roughly the potential gradient at AO; it sees deeper and its response is asymmetric. Remote electrodes are modelled as ideal poles (index −1).
+
+**Tool constant.** With a tool body, the analytic geometric factor no longer applies. Like a real tool, the code calibrates it: it simulates the same protocol in a homogeneous 1 Ohm.m earth with the tool and uses k = 1 / R, so a homogeneous earth reads its true resistivity at every depth.
+
+**Focused (bucked) induction tool.** A bucking receiver at distance s_b, wound against the main receiver with weight −(s_b/s)³, cancels the direct field. The near-axis contribution of a conductive borehole scales the same way (∝ area / s³), so it cancels to first order as well, which is why focused tools see much less of the backfill. With 1 Ohm.m backfill in 100 Ohm.m, s = 0.5 m: two-coil 18.9 Ohm.m, focused (s_b = 0.25 m) 67.4 Ohm.m.
+
+**Validation** (`geometry_class/analytic.py`): the ring-electrode results are compared with a three-region Fourier–Bessel solution (insulating mandrel, backfill, formation) for ring electrodes on the mandrel, using the same calibration: normal 16"/64" and lateral within 0.3% for 1 and 1000 Ohm.m backfill. The focused EM tool agrees with the analytic borehole solution within 0.2–1.3%.
 
 ### Why the two tools react differently
 

@@ -107,7 +107,7 @@ The order matters: electrodes are added to the geometry before meshing, so every
 | Method | What it does |
 |---|---|
 | `make_basic_geometry(vtk_filename="plc.vtk")` | Builds the geometry: concentric polygons (borehole zones → near zone → mid zone → world) cut by horizontal planes at every layer interface, zone top/bottom and the borehole bottom. Each piece is its own region. Pass `vtk_filename=None` to skip the VTK file. |
-| `make_array(geom, abmn_order, short_spacing, long_spacing, measuring_spacing, protocol_filename="protocol.dat")` | Puts electrodes every `measuring_spacing` along the axis, from 0 to `borehole_length`, and builds the protocol for the two spacings. `abmn_order` gives the positions of A, B, M, N in the array, e.g. `(1, 4, 2, 3)` = Wenner A–M–N–B. Returns a `pg.DataContainerERT`. |
+| `make_array(geom, abmn_order, short_spacing, long_spacing, measuring_spacing, protocol_filename="protocol.dat", electrode_offset=None)` | Puts electrodes every `measuring_spacing` along the axis, starting at depth `electrode_offset`, and builds the protocol for the two spacings. `abmn_order` gives the positions of A, B, M, N in the array, e.g. `(1, 4, 2, 3)` = Wenner A–M–N–B. By default the first electrode is at 0, unless the grid would put an electrode exactly on a layer interface, zone boundary or the borehole bottom: then the grid is shifted by half a step (with a warning), because a point electrode on a resistivity jump converges poorly. If `short_spacing` is smaller than the borehole cell size, the borehole cells are refined to match. Returns a `pg.DataContainerERT`. |
 | `make_mesh(geom, vtk_filename="mesh.vtk", quality=1.3)` | Runs TetGen and sets the boundary markers. `quality` is TetGen's radius–edge ratio; keep 1.2–1.4. |
 | `run(mesh, data, rhomap=None, output_filename="simulated_data.dat", noise_level=0, noise_abs=0, include_borehole=True)` | Forward model. Returns a data container with `rhoa` (apparent resistivity), `r` (resistance) and `k` (geometric factor). `include_borehole=False` replaces the hole by formation. |
 | `set_borehole(backfill_resistivity=None, borehole_zones=None)` | Changes the borehole resistivities on the existing mesh. The zone radii and depths must stay the same. |
@@ -144,7 +144,7 @@ Everything happens inside `run()`: mesh, model, survey, solve. With the cylindri
 | `coil_orientation` | `"z"` | `"z"`: coil axes along the hole (coaxial, as in standard induction tools). `"x"`/`"y"`: across the hole (coplanar); needs `n_theta_cells >= 8` or `mesh_type="tree"`. |
 | `measuring_spacing` | 0.1 | Tool step along the hole (m). |
 | `receiver_above` | `False` | Receiver below (default) or above the transmitter. |
-| `mesh_type` | `"cylindrical"` | `"cylindrical"`: axisymmetric, fast, recommended. `"tree"`: one 3D octree per tool position; slow, for future non-axisymmetric models. |
+| `mesh_type` | `"cylindrical"` | `"cylindrical"`: axisymmetric, fast, validated; use this. `"tree"`: one 3D octree per tool position. **Experimental**: its refinement doesn't resolve the borehole yet and results can be off by 15% or more. |
 | `core_cell_size` | 0.05 | Radial cell size outside the hole (m). The vertical cell size is `min(core_cell_size, smallest spacing / 20)`. |
 | `borehole_cells` | 10 | Radial cells across the innermost borehole zone. |
 | `domain_radius` | `None` | Model radius (m). `None` = max(100 m, 3 skin depths in the most resistive layer at the lowest frequency). |
@@ -164,7 +164,8 @@ A pandas DataFrame with one row per tool position, coil spacing and frequency:
 | `frequency` | Frequency (Hz). |
 | `real`, `imag` | Secondary magnetic field H (A/m) for a unit-moment transmitter. |
 | `amplitude`, `phase` | Magnitude (A/m) and phase (degrees) of the secondary field. |
-| `apparent_resistivity` | Low-induction-number apparent resistivity (Ohm.m). |
+| `apparent_resistivity` | Resistivity of the homogeneous full space that produces the same quadrature field (Ohm.m). Exact at any frequency. |
+| `apparent_resistivity_lin` | Low-induction-number approximation of the same (Ohm.m); too high by up to ~13% in 1 Ohm.m ground at 8000 Hz with s = 1 m. |
 
 Both coils always stay inside the borehole, so a log covers depths from s/2 to `borehole_length` − s/2.
 
@@ -194,7 +195,7 @@ For a backfill sweep, build the ERT mesh once and change only the resistivity wi
 
 ### ERT
 
-The default mesh reproduces the analytic borehole solution within 0.1%. Its cost depends mostly on the borehole diameter, the electrode step and the borehole length:
+The default mesh reproduces the analytic borehole solution within 0.1% for Wenner spacings from a = R (borehole radius) to 10 R. In a layered model (100/10/200 Ohm.m, 1 Ohm.m backfill), a 1.7× finer mesh changes the logs by at most 0.04%, both with and without the hole. This relies on the electrode grid avoiding interfaces (see `make_array`): with an electrode exactly on an interface the no-hole reference was off by up to 5%. Its cost depends mostly on the borehole diameter, the electrode step and the borehole length:
 
 | Default case (15 m, D = 0.2 m, 151 electrodes) | |
 |---|---|
@@ -236,8 +237,9 @@ The defaults are convergence-tested: the borehole effect changes by less than 1.
 - **Equation:** frequency-domain Maxwell equations, E-field formulation (SimPEG), with a point magnetic dipole source of unit moment. SimPEG uses the e^{+iωt} time convention.
 - **Boundaries:** tangential E = 0 at the outer boundary, placed at least 3 skin depths away so that it doesn't affect the result. The axis of the cylindrical mesh is handled exactly.
 - **Measured quantity:** the secondary magnetic field (total minus free-space primary) at the receiver.
-- **Apparent resistivity:** low-induction-number formula for a tool surrounded by the medium:
-  σa = k · s · (−Im H_s) / (μ₀ ω), with k = 4π for coaxial and 8π for coplanar coils. It is accurate when the coil spacing is much smaller than the skin depth δ ≈ 503 √(ρ/f) m; for the defaults (s ≤ 1 m, δ ≥ 18 m) the error is below 2%.
+- **Apparent resistivity** (`apparent_resistivity`): the resistivity of the homogeneous full space whose quadrature field −Im H_s equals the simulated one, found by inverting the exact full-space dipole formula. The quadrature of a full space rises with conductivity up to an induction number s/δ of about 1–2 and then falls; only the rising branch is used, so the result is unique.
+- **LIN apparent resistivity** (`apparent_resistivity_lin`): σa = k · s · (−Im H_s) / (μ₀ ω), with k = 4π for coaxial and 8π for coplanar coils. It assumes s ≪ δ ≈ 503 √(ρ/f) m; in a homogeneous earth it is too high by 0.3% (100 Ohm.m, 400 Hz, s = 1 m) up to 13% (1 Ohm.m, 8000 Hz, s = 1 m).
+- **In-phase field:** at these induction numbers the in-phase secondary field is ~1e-8 of the primary, below the accuracy of any mesh, so `real`, `amplitude` and `phase` should not be interpreted.
 
 ### Why the two tools react differently
 
@@ -275,4 +277,5 @@ The reference solutions are in [`geometry_class/analytic.py`](../geometry_class/
 | `ValueError: coil_orientation='x' ... needs n_theta_cells >= 8` | Coplanar coils aren't axisymmetric; set `n_theta_cells=8` or more, or use `mesh_type="tree"`. |
 | `ValueError: Outermost borehole zone ... exceeds the borehole radius` | A zone radius is larger than `borehole_diameter / 2`. |
 | `ValueError: set_borehole can only change resistivities` | You changed zone radii or depths; build a new geometry and mesh. |
-| `apparent_resistivity` is NaN | The quadrature field has the wrong sign, which happens far outside the low-induction-number range (very conductive ground, high frequency, long spacing). Use the `real`/`imag` fields instead. |
+| `apparent_resistivity` is NaN | The quadrature has the wrong sign or is larger than any full space can produce (very high induction number: very conductive ground, high frequency, long spacing). Use a lower frequency or shorter spacing, or work with `imag` directly. |
+| Warning `Electrodes would sit on layer/zone interfaces` | Informational: the electrode grid was shifted by half a step. Pass `electrode_offset=` to choose the positions yourself. |

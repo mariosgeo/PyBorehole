@@ -62,3 +62,40 @@ def fullspace_hs(rho, freq, spacing, orientation="z"):
         hp = -1.0 / (4.0 * np.pi * spacing**3)
         h = hp * (1.0 + 1j * ks - ks**2) * np.exp(-1j * ks)
     return h - hp, hp
+
+
+def borehole_coaxial_hs(rho_hole, rho_formation, radius, freq, spacing):
+    """Secondary Hz (A/m) for coaxial coils on the axis of an infinite borehole.
+
+    Unit-moment z-dipole on the axis of a borehole (radius ``radius``,
+    resistivity ``rho_hole``) in a homogeneous formation, SimPEG's
+    e^{+i w t} convention.  Returned field is relative to the free-space
+    primary, like ``fullspace_hs``.
+
+    Inside the hole E_phi = C int [-nu1 K1(nu1 r)/(2 pi^2) + A(l) I1(nu1 r)] cos(l z) dl
+    (first term = full space of the hole fill); continuity of E_phi and H_z at
+    r = radius gives
+        A = nu1/(2 pi^2) (nu2 K0(nu2 a) K1(nu1 a) - nu1 K0(nu1 a) K1(nu2 a))
+                        / (nu1 I0(nu1 a) K1(nu2 a) + nu2 K0(nu2 a) I1(nu1 a)),
+    and on the axis  dHz(z) = -int A(l) nu1 cos(l z) dl,  nu_i = sqrt(l^2 + i w mu sigma_i).
+    """
+    from scipy.special import ive, kve
+
+    omega = 2.0 * np.pi * freq
+    a = radius
+
+    def integrand(l):
+        nu1 = np.sqrt(l**2 + 1j * omega * MU0 / rho_hole)
+        nu2 = np.sqrt(l**2 + 1j * omega * MU0 / rho_formation)
+        x1, x2 = nu1 * a, nu2 * a
+        # Scaled Bessels: K(x) = kve e^{-x}, I(x) = ive e^{Re x}
+        num = nu2 * kve(0, x2) * kve(1, x1) - nu1 * kve(0, x1) * kve(1, x2)
+        den = nu1 * ive(0, x1) * kve(1, x2) + nu2 * kve(0, x2) * ive(1, x1)
+        amp = nu1 / (2.0 * np.pi**2) * np.exp(-x1 - x1.real) * num / den
+        return -amp * nu1 * np.cos(l * spacing)
+
+    upper = 60.0 / a
+    re, _ = quad(lambda l: integrand(l).real, 0.0, upper, limit=4000)
+    im, _ = quad(lambda l: integrand(l).imag, 0.0, upper, limit=4000)
+    hs_fill, _ = fullspace_hs(rho_hole, freq, spacing, "z")
+    return hs_fill + (re + 1j * im)

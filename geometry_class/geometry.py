@@ -122,6 +122,7 @@ class Geometry:
 
         # Target edge length h -> max volume of a regular tetrahedron h^3 / (6 sqrt 2)
         tet = lambda h: h**3 / (6.0 * np.sqrt(2.0))
+        self._auto_borehole_area = self.borehole_area is None
         if self.borehole_area is None:
             self.borehole_area = tet(radius / 1.6)
         if self.near_area is None:
@@ -214,6 +215,7 @@ class Geometry:
 
         # One region per (ring slot, slab); marker placed mid-slot on the polygon's bisector
         self._regions = {}
+        self._zone_markers = set()
         marker = 0
         for k in range(len(levels) - 1):
             d_mid = 0.5 * (levels[k] + levels[k + 1])
@@ -234,6 +236,8 @@ class Geometry:
                     area = self.mid_area
                 marker += 1
                 self._regions[marker] = (r_mid, d_mid)
+                if j < n_zones:
+                    self._zone_markers.add(marker)
                 plc.addRegionMarker([rp_mid * np.cos(np.pi / n), rp_mid * np.sin(np.pi / n), -d_mid],
                                     marker=marker, area=area)
 
@@ -248,7 +252,8 @@ class Geometry:
         short_spacing: float,
         long_spacing: float,
         measuring_spacing: float,
-        protocol_filename: str = "protocol.dat"
+        protocol_filename: str = "protocol.dat",
+        electrode_offset: Optional[float] = None,
     ) -> pg.DataContainerERT:
         """
         Generate an electrode array, move it along the borehole, create a protocol, and add nodes to the PLC.
@@ -260,6 +265,11 @@ class Geometry:
             long_spacing (float): The maximum 'a' spacing for the array.
             measuring_spacing (float): The step size to move the array down the borehole.
             protocol_filename (str): Output filename for the protocol.
+            electrode_offset (Optional[float]): Depth of the first electrode (m). ``None``
+                (default) = 0, unless an electrode would then sit exactly on a layer
+                interface or zone boundary; the grid is then shifted by half a step,
+                because a point electrode on a resistivity jump converges poorly
+                (up to ~5 % error in the no-borehole reference).
 
         Returns:
             pg.DataContainerERT: The generated data container with the protocol.
@@ -270,8 +280,30 @@ class Geometry:
             warnings.warn(f"long_spacing={long_spacing} exceeds Geometry.long_spacing="
                           f"{self.long_spacing}; the refined mid zone may be too small.")
 
-        num_electrodes = int(round(self.borehole_length / measuring_spacing)) + 1
-        z_positions = -np.arange(num_electrodes) * measuring_spacing
+        interfaces = self._interface_depths()
+        on_interface = lambda depths: [d for d in depths if np.any(np.abs(interfaces - d) < 1e-6)]
+        grid = lambda off: off + measuring_spacing * np.arange(
+            int(np.floor((self.borehole_length - off) / measuring_spacing + 1e-9)) + 1)
+        if electrode_offset is None:
+            electrode_offset = 0.0
+            if on_interface(grid(0.0)):
+                electrode_offset = 0.5 * measuring_spacing
+                warnings.warn(f"Electrodes would sit on layer/zone interfaces; electrode grid "
+                              f"shifted by {electrode_offset:g} m.")
+        depths = grid(electrode_offset)
+        clash = on_interface(depths)
+        if clash:
+            warnings.warn(f"Electrodes at depths {clash} sit on a resistivity interface; "
+                          "results there converge poorly.")
+        z_positions = -depths
+
+        # Small spacings need borehole cells no larger than the spacing
+        h_bh = (self.borehole_area * 6.0 * np.sqrt(2.0)) ** (1.0 / 3.0)
+        if self._auto_borehole_area and short_spacing < h_bh:
+            self.borehole_area = short_spacing**3 / (6.0 * np.sqrt(2.0))
+            for rm in geom.regionMarkers():
+                if rm.marker() in self._zone_markers:
+                    rm.setArea(self.borehole_area)
 
         # Electrodes are PLC nodes on the borehole axis (reusing the plane-centre
         # nodes where they coincide) ...
@@ -371,6 +403,15 @@ class Geometry:
         markers = sorted(self._regions)
         r, d = np.array([self._regions[m] for m in markers]).T
         return [[m, float(rho)] for m, rho in zip(markers, self.resistivity_at(r, d, include_borehole))]
+
+    def _interface_depths(self) -> np.ndarray:
+        """Depths (> 0) of layer interfaces, zone limits and the borehole bottom."""
+        d = {self.borehole_length}
+        if self.layer_1d_geometry is not None:
+            d.update(float(x) for x in self.layer_1d_geometry[:, :2].ravel())
+        for z in self.zones:
+            d.update((z.top, z.bottom))
+        return np.array(sorted(x for x in d if x > 1e-9))
 
     def cell_resistivity(self, mesh: pg.core.Mesh, include_borehole: bool = True) -> np.ndarray:
         """Per-cell resistivity from the regions (``include_borehole=False`` -> no-hole reference)."""

@@ -69,7 +69,7 @@ OUTPUT_DIR        = "results"               # all figures are written here
 | `EM_COIL_SPACINGS` | Transmitter–receiver distances (m) of the coaxial induction coils. |
 | `EM_FREQUENCIES` | EM frequencies (Hz). |
 | `EM_MEAS_SPACING` | Step of the EM tool along the hole (m). |
-| `EM_MESH_TYPE` | `"cylindrical"` (fast and exact for this axisymmetric problem; recommended) or `"tree"` (3D octree, for non-axisymmetric extensions). |
+| `EM_MESH_TYPE` | `"cylindrical"` (fast and exact for this axisymmetric problem; use this). `"tree"` (3D octree) is experimental and not yet accurate. |
 | `OUTPUT_DIR` | Folder for the figures. |
 
 ### 3. Run
@@ -105,9 +105,9 @@ The printed table looks like this (default model, D = 0.2 m):
 
 ```
  layer_rho  depth  backfill  ERT a=0.5  ERT a=1  EM s=0.5  EM s=1
-     100.0    2.5       1.0      0.512    1.199     0.210   0.550
+     100.0    2.5       1.0      0.512    1.199     0.210   0.549
      100.0    2.5     100.0      1.000    1.000     1.000   1.000
-     200.0   12.5       1.0      0.315    0.887     0.135   0.446
+     200.0   12.5       1.0      0.315    0.887     0.135   0.445
      ...
 ```
 
@@ -170,17 +170,19 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 
 | Check | Reference | Result |
 |---|---|---|
-| ERT Wenner in a 0.2 m borehole, backfill 1 and 1000 Ohm.m in 100 Ohm.m | Fourier–Bessel solution for an infinite borehole | within 0.1% |
+| ERT Wenner in a 0.2 m borehole, backfill 1 and 1000 Ohm.m in 100 Ohm.m, a = 0.1–1 m | Fourier–Bessel solution for an infinite borehole | within 0.1% |
+| ERT in a layered model (100/10/200 Ohm.m), with and without the hole | 1.7× finer mesh | within 0.04% |
 | ERT without borehole | homogeneous half-space | exact |
-| EM coaxial coils in a full space, 400 and 8000 Hz | analytic dipole field | quadrature within ~1.5% |
-| EM borehole effect | 4× radially refined mesh | within 1.5% |
+| EM coaxial coils in a full space (1–100 Ohm.m), 400 and 8000 Hz | analytic dipole field | quadrature and apparent resistivity within ~1.5% |
+| EM coaxial coils in a 0.2 m borehole, backfill 1–1000 Ohm.m | Fourier–Bessel solution for an infinite borehole | quadrature within 0.1–1.7% |
 
 ## Limitations
 
 - The borehole is vertical and the layers are horizontal.
 - The tool sits on the borehole axis; the tool body (mandrel) is not modelled.
 - ERT uses a Wenner-type array (any A, B, M, N order on equally spaced electrodes). Normal and lateral arrays are not implemented yet.
-- EM apparent resistivity uses the low-induction-number approximation, which assumes the coil spacing is much smaller than the skin depth.
+- The EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree option is experimental and not yet accurate.
+- EM `real`, `amplitude` and `phase` are not meaningful at these low induction numbers (the in-phase secondary field is ~1e-8 of the primary); use the quadrature (`imag`) or the apparent resistivity.
 
 ## Repository layout
 

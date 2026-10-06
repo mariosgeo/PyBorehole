@@ -303,13 +303,13 @@ for top, bot, res in LAYERS:
         row = {"layer_rho": res, "depth": zmid, "backfill": rho_bf}
         for a in np.unique(ert_ref["a"]):
             d, d0 = ert_res[rho_bf], ert_ref
-            i = (d["a"] == a) & np.isclose(d["depth"], zmid, atol=ERT_MEAS_SPACING / 2)
-            i0 = (d0["a"] == a) & np.isclose(d0["depth"], zmid, atol=ERT_MEAS_SPACING / 2)
+            i = (d["a"] == a) & np.isclose(d["depth"], zmid, atol=ERT_MEAS_SPACING / 2 + 1e-6)
+            i0 = (d0["a"] == a) & np.isclose(d0["depth"], zmid, atol=ERT_MEAS_SPACING / 2 + 1e-6)
             row[f"ERT a={a:g}"] = d.loc[i, "rhoa"].mean() / d0.loc[i0, "rhoa"].mean()
         for s in EM_COIL_SPACINGS:
             f = EM_FREQUENCIES[0]
             sel = lambda df: df[(df["frequency"] == f) & (df["spacing"] == s)
-                                & np.isclose(df["depth"], zmid, atol=EM_MEAS_SPACING / 2)]
+                                & np.isclose(df["depth"], zmid, atol=EM_MEAS_SPACING / 2 + 1e-6)]
             row[f"EM s={s:g}"] = sel(em_res[rho_bf])["apparent_resistivity"].mean() / \
                 sel(em_ref)["apparent_resistivity"].mean()
         rows.append(row)

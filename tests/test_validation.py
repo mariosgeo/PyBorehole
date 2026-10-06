@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore")
 
 from geometry_class import EMGeometry, Geometry  # noqa: E402
-from geometry_class.analytic import borehole_wenner_rhoa, fullspace_hs  # noqa: E402
+from geometry_class.analytic import borehole_coaxial_hs, borehole_wenner_rhoa, fullspace_hs  # noqa: E402
 from geometry_class.borehole_model import make_zones, resistivity_rz  # noqa: E402
 
 LAYERS_HOMOG = np.array([[0.0, 20.0, 100.0]])
@@ -54,6 +54,17 @@ def test_em_fullspace_matches_analytic():
         assert abs(row.apparent_resistivity / 100.0 - 1) < 0.02
 
 
+@pytest.mark.parametrize("rho_bf", [1.0, 1000.0])
+def test_em_borehole_matches_analytic(rho_bf):
+    """Coaxial coils in an infinite borehole: quadrature within 2 % of the Fourier-Bessel solution."""
+    df = _em(rho_bf).run(verbose=False)
+    df = df[np.isclose(df.tx_depth, 10.0)]
+    assert len(df) == 4
+    for _, row in df.iterrows():
+        hs = borehole_coaxial_hs(rho_bf, 100.0, 0.1, row.frequency, row.spacing)
+        assert abs(row.imag / hs.imag - 1) < 0.02
+
+
 def test_em_borehole_effect_converged():
     """Conductive backfill: default mesh within 1.5 % of a 4x radially refined mesh."""
     pick = lambda df: df[np.isclose(df.tx_depth, 10.0)].apparent_resistivity.values
@@ -61,6 +72,16 @@ def test_em_borehole_effect_converged():
     fine = pick(_em(1.0, borehole_cells=40).run(verbose=False))
     np.testing.assert_allclose(coarse, fine, rtol=0.015)
     assert coarse[0] < 25.0  # strong effect for s=0.5 m: ~19 Ohm.m instead of 100
+
+
+def test_em_exact_apparent_resistivity_beyond_lin():
+    """1 Ohm.m full space at 8000 Hz, s = 1 m: LIN is ~13 % off, the exact inversion within 2 %."""
+    em = EMGeometry(borehole_length=20.0, borehole_diameter=0.2, layer_1d_geometry=np.array([[0.0, 20.0, 1.0]]),
+                    backfill_resistivity=1.0, air_resistivity=1.0, frequencies=[8000.0],
+                    coil_spacings=[1.0], measuring_spacing=10.0)
+    row = em.run(verbose=False).query("tx_depth == 10.0").iloc[0]
+    assert abs(row.apparent_resistivity - 1.0) < 0.02
+    assert row.apparent_resistivity_lin > 1.10
 
 
 def test_em_tool_stays_in_borehole():
@@ -127,3 +148,16 @@ def test_ert_boundary_markers():
     # Borehole cells carry the backfill resistivity and fill the (equal-area) hole volume
     vol = sum(c.size() for c in mesh.cells() if c.center()[2] > -5.0 and np.hypot(c.center()[0], c.center()[1]) < 0.1)
     assert abs(vol / (np.pi * 0.1**2 * 5.0) - 1) < 0.05
+
+
+def test_ert_electrodes_avoid_interfaces():
+    """Electrodes are shifted off layer interfaces; small spacings refine the borehole cells."""
+    geo = Geometry(borehole_length=6.0, borehole_diameter=0.2, layer_1d_geometry=np.array(
+        [[0.0, 2.0, 100.0], [2.0, 4.0, 10.0], [4.0, 6.0, 200.0]]), backfill_resistivity=1.0)
+    plc = geo.make_basic_geometry(vtk_filename=None)
+    area_before = geo.borehole_area
+    data = geo.make_array(plc, (1, 4, 2, 3), 0.03, 0.06, 0.01, protocol_filename=None)
+    depths = -np.array([data.sensorPosition(i)[2] for i in range(data.sensorCount())])
+    assert np.isclose(depths[0], 0.005)
+    assert np.min(np.abs(depths[:, None] - np.array([2.0, 4.0, 6.0])[None, :])) > 1e-3
+    assert geo.borehole_area < area_before

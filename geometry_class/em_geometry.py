@@ -50,7 +50,25 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from functools import lru_cache
+
+from scipy.optimize import brentq
+
+from .analytic import fullspace_hs
 from .borehole_model import make_zones, resistivity_rz
+
+
+@lru_cache(maxsize=None)
+def _fullspace_quadrature_curve(freq: float, spacing: float, orientation: str):
+    """Quadrature -Im(H_s) of a homogeneous full space versus log10(sigma), up to its maximum.
+
+    -Im(H_s) rises with conductivity, peaks at an induction number s/delta ~ 1-2
+    and then falls, so only the rising branch gives a unique apparent resistivity.
+    """
+    log_sigma = np.linspace(-8.0, 4.0, 1201)
+    q = np.array([-fullspace_hs(10.0**-ls, freq, spacing, orientation)[0].imag for ls in log_sigma])
+    i_peak = int(np.argmax(q))
+    return log_sigma[: i_peak + 1], q[: i_peak + 1]
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -275,6 +293,12 @@ class EMGeometry:
             rho_max = max(self._formation_resistivities())
             skin = 503.0 * np.sqrt(rho_max / min(self.frequencies))
             self.domain_radius = float(max(100.0, 3.0 * skin))
+        if self.mesh_type == "tree":
+            warnings.warn(
+                "mesh_type='tree' is experimental: its refinement does not yet resolve the "
+                "borehole and results can be off by 15 % or more. Use 'cylindrical'.",
+                stacklevel=2,
+            )
         if self.mesh_type == "tree" and self.core_cell_size > self.zones[0].r_outer / 3.0:
             warnings.warn(
                 f"TreeMesh: core_cell_size={self.core_cell_size} m does not resolve the "
@@ -528,7 +552,8 @@ class EMGeometry:
                     "imag":      h_imag,
                     "amplitude": float(np.hypot(h_real, h_imag)),
                     "phase":     float(np.degrees(np.arctan2(h_imag, h_real))),
-                    "apparent_resistivity": self._lin_apparent_resistivity(h_imag, spacing, freq),
+                    "apparent_resistivity": self._apparent_resistivity(h_imag, spacing, freq),
+                    "apparent_resistivity_lin": self._lin_apparent_resistivity(h_imag, spacing, freq),
                 }
             )
         return records
@@ -570,7 +595,9 @@ class EMGeometry:
             * ``imag``      — imaginary part of H_secondary (A/m)  [= B_imag/μ₀]
             * ``amplitude`` — |H_secondary| (A/m)
             * ``phase``     — phase angle (°)
-            * ``apparent_resistivity`` — LIN apparent resistivity (Ω·m)
+            * ``apparent_resistivity`` — resistivity of the homogeneous full space
+              that gives the same quadrature field (Ω·m); exact at any frequency
+            * ``apparent_resistivity_lin`` — low-induction-number approximation (Ω·m)
 
         Raises
         ------
@@ -881,6 +908,24 @@ class EMGeometry:
         return float(1.0 / sigma_a)
 
     # ──────────────────────────────────────────────────────────────────────────
+    def _apparent_resistivity(self, h_imag: float, spacing: float, freq: float) -> float:
+        """Apparent resistivity: the full space whose quadrature field equals the simulated one.
+
+        Unlike the LIN formula this has no low-induction-number error (e.g. 13 %
+        for s = 1 m at 8000 Hz in 1 Ω·m).  Returns NaN when the quadrature has
+        the wrong sign or exceeds the full-space maximum (no unique answer).
+        """
+        q = -h_imag  # SimPEG e^{+iwt}: Im(H_sec) < 0 for a conductive earth
+        orient = "z" if self.coil_orientation == "z" else "x"
+        log_sigma, q_curve = _fullspace_quadrature_curve(float(freq), float(spacing), orient)
+        if not (q_curve[0] < q <= q_curve[-1]):
+            return float("nan")
+        i = int(np.searchsorted(q_curve, q))
+        f = lambda ls: -fullspace_hs(10.0**-ls, freq, spacing, orient)[0].imag - q
+        log_s = brentq(f, log_sigma[i - 1], log_sigma[i], xtol=1e-10)
+        return float(10.0 ** -log_s)
+
+    # ──────────────────────────────────────────────────────────────────────────
     def plot_mesh_slice(
         self,
         mesh: "_discretize.CylindricalMesh",
@@ -1017,8 +1062,9 @@ class EMGeometry:
         quantity : str, optional
             Column to plot.  Choices:
 
-            * ``'apparent_resistivity'`` (default) — LIN apparent resistivity
+            * ``'apparent_resistivity'`` (default) — apparent resistivity
               in Ohm.m; log x-axis applied automatically.
+            * ``'apparent_resistivity_lin'`` — LIN approximation.
             * ``'amplitude'`` — |H_secondary| in A/m.
             * ``'phase'`` — phase angle in degrees.
             * ``'real'`` / ``'imag'`` — H-field components in A/m.
@@ -1034,13 +1080,13 @@ class EMGeometry:
         -------
         matplotlib.figure.Figure
         """
-        _valid = ("apparent_resistivity", "amplitude", "phase", "real", "imag")
+        _valid = ("apparent_resistivity", "apparent_resistivity_lin", "amplitude", "phase", "real", "imag")
         if quantity not in _valid:
             raise ValueError(f"quantity must be one of {_valid}.")
 
         # Auto log-scale: on for resistivity and amplitude, off for phase/field
         if log_scale is None:
-            log_scale = quantity in ("apparent_resistivity", "amplitude")
+            log_scale = quantity in ("apparent_resistivity", "apparent_resistivity_lin", "amplitude")
 
         combos  = result.groupby(["spacing", "frequency"], sort=True)
         n_combos = len(combos)
@@ -1132,7 +1178,7 @@ class EMGeometry:
         """
         # Auto log-scale
         if log_scale is None:
-            log_scale = quantity in ("apparent_resistivity", "amplitude")
+            log_scale = quantity in ("apparent_resistivity", "apparent_resistivity_lin", "amplitude")
         bh_total = self.borehole_length
         fig, (ax_model, ax_log) = plt.subplots(
             1, 2,

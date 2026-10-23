@@ -14,6 +14,7 @@ Most users only need [`run_combined.py`](../run_combined.py). Read on if you wan
 6. [Physics and boundary conditions](#6-physics-and-boundary-conditions)
 7. [Testing](#7-testing)
 8. [Troubleshooting](#8-troubleshooting)
+9. [Gamma-ray simulator: `GammaGeometry`](#9-gamma-ray-simulator-gammageometry)
 
 ---
 
@@ -315,6 +316,8 @@ pytest tests/                 # all tests, ~5 min
 - ERT against the analytic infinite-borehole Wenner response (`slow`),
 - the ERT no-borehole reference and the boundary markers.
 
+[`tests/test_gamma.py`](../tests/test_gamma.py) checks the gamma-ray simulator (§9, about 30 s; marked `gamma` and skipped without Geant4).
+
 The reference solutions are in [`geometry_class/analytic.py`](../geometry_class/analytic.py) and can be used on their own, e.g. `borehole_wenner_rhoa(a, radius, rho_hole, rho_formation)`.
 
 ---
@@ -332,3 +335,106 @@ The reference solutions are in [`geometry_class/analytic.py`](../geometry_class/
 | `ValueError: set_borehole can only change resistivities` | You changed zone radii or depths; build a new geometry and mesh. |
 | `apparent_resistivity` is NaN | The quadrature has the wrong sign or is larger than any full space can produce (very high induction number: very conductive ground, high frequency, long spacing). Use a lower frequency or shorter spacing, or work with `imag` directly. |
 | Warning `Electrodes would sit on layer/zone interfaces` | Informational: the electrode grid was shifted by half a step. Pass `electrode_offset=` to choose the positions yourself. |
+| `FileNotFoundError: Geant4 data set G4EMLOW* not found` | The Geant4 data sets aren't installed. Download `G4EMLOW`, `G4ENSDFSTATE` and `PhotonEvaporation` and unpack them in `%USERPROFILE%\geant4-data` (or set `GEANT4_DATA_DIR`). |
+| `G4Exception ... environment variable not set` from `gammalog` | Another Geant4 data set is needed; its name is in the message. Add it to the same folder; `geant4_env()` in `gamma_geometry.py` lists the variables it sets. |
+| `gammalog.exe` fails to start (missing DLL) | The Geant4 `bin` folder must be on `PATH`; `GammaGeometry` adds `GEANT4_DIR\bin` itself. Run `gamma\build.bat` again after a Geant4 upgrade. |
+
+---
+
+## 9. Gamma-ray simulator: `GammaGeometry`
+
+`GammaGeometry` ([`geometry_class/gamma_geometry.py`](../geometry_class/gamma_geometry.py)) simulates a natural gamma-ray tool in the same layered earth and borehole, by Monte Carlo photon transport in Geant4. The transport is done by [`gamma/gammalog.cc`](../gamma/gammalog.cc), compiled once with `gamma\build.bat` (see the README for installation).
+
+### The model
+
+- **Formation and fill.** Each layer and each borehole zone is a `GammaMedium`: a `material` (a water-saturated mineral mixture from `MATERIALS`: `water`, `sand`, `clay`, `gravel`, `limestone`, `sand_pack`, `bentonite`, `cement`; or a salt solution from `SOLUTIONS`: `seawater`, `kcl_brine`; add your own there) and its radioactivity `K` (%), `U` (ppm), `Th` (ppm) per bulk (wet) mass. `density` overrides the preset bulk density.
+- **Sources.** K-40 (1.461 MeV) and the main gamma lines of the U-238 and Th-232 series in secular equilibrium (`GAMMA_LINES`). Activities: 1 % K = 313 Bq/kg, 1 ppm U = 12.35 Bq/kg, 1 ppm Th = 4.06 Bq/kg (IAEA-TECDOC-1363).
+- **Tool.** A NaI(Tl) crystal, 38 × 102 mm by default, in a 50 mm steel housing with 3 mm walls, centred in the hole. The housing is the probe's own body, not a casing: the default borehole is open hole with backfill. Add a casing as a fill zone if your well has one. The energy deposited in the crystal is smeared to 7 % FWHM at 662 keV. Depth is the centre of the crystal.
+- **Geometry.** The model is axisymmetric: coaxial (r, z) tubes for the layers, the borehole zones, the housing and the crystal, rebuilt at every station. Air is above the surface.
+- **No-borehole reference.** `run(include_borehole=False)` fills the hole with the surrounding formation and keeps the tool, so the ratio of the two runs isolates the borehole (the same convention as ERT and EM).
+
+### Workflow
+
+```python
+from geometry_class import GammaGeometry, GammaMedium
+
+gr = GammaGeometry(
+    layers=[(0, 5, dict(material="sand", K=1.2, U=1.5, Th=6.0)),
+            (5, 10, dict(material="clay", K=2.5, U=3.5, Th=12.0))],
+    borehole_length=10, borehole_diameter=0.2,
+    backfill=GammaMedium("bentonite", K=0.3, U=2.0, Th=8.0),
+)
+log    = gr.run()                         # with the backfilled hole
+ref    = gr.run(include_borehole=False)   # no borehole
+effect = log.cps / ref.cps
+gr.set_backfill(dict(material="water"))   # or set_backfill(zones=[(r, medium), ...])
+log, spectra = gr.run(return_spectra=True)
+```
+
+Concentric zones work as for ERT and EM, e.g. water inside a PVC casing and a gravel pack outside:
+
+```python
+gr = GammaGeometry(..., zones=[(0.045, dict(material="water")),
+                               (0.100, dict(material="sand_pack", K=0.3, U=0.5, Th=1.5))])
+```
+
+(The 5 mm PVC wall is thin and light enough to leave out for the gamma ray.)
+
+### Parameters
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `layers` | | List of `(top, bottom, medium)`; depths positive down; the last layer continues downwards. |
+| `borehole_length`, `borehole_diameter` | | m |
+| `backfill` / `zones` | water | One fill medium, or concentric zones `(outer_radius, medium)` from the inside out. |
+| `measuring_spacing` | 0.1 | Station step (m). |
+| `top_clearance`, `bottom_clearance` | 0.5 | The first and last stations are this far from the surface and the hole bottom (the housing extends 0.5 m above and 0.3 m below the crystal centre). |
+| `crystal_diameter`, `crystal_length` | 0.038, 0.102 | NaI crystal (m). |
+| `tool_diameter`, `housing_thickness` | 0.050, 0.003 | Steel housing (m). |
+| `resolution` | 0.07 | FWHM / E at 662 keV. |
+| `threshold` | 0.1 | Lower energy threshold of the gross count (MeV). |
+| `events` | 150 000 | Simulated emissions per station and nuclide group. |
+| `n_jobs` | all cores | Parallel Geant4 processes; stations are shared between them. |
+| `seed` | 12345 | Random seed (each process gets its own stream). |
+| `calibration_material` | `sand` | Material of the calibration formation. |
+| `source_radius`, `sampling_length` | 1.0, 0.15 | Variance-reduction settings (below); there is normally no reason to change them. |
+
+### Output of `run()`
+
+| Column | Meaning |
+|---|---|
+| `depth` | Crystal centre (m). |
+| `cps`, `cps_err` | Gross count rate above `threshold` (counts/s) and its 1σ Monte Carlo error. |
+| `cps_K`, `cps_U`, `cps_Th` | Gross count rate from each nuclide group. |
+| `K_win`, `U_win`, `Th_win` | Count rates in the standard spectral windows 1.37–1.57, 1.66–1.86 and 2.41–2.81 MeV. |
+| `K_app`, `U_app`, `Th_app` | Apparent concentrations: count rate of each group divided by its count rate per unit concentration in the calibration formation. |
+| `GR_api`, `GR_err` | Gross count rate in API units and its error. |
+| `GR_true` | 16 K + 8 U + 4 Th of the layer at the station. |
+
+### Calibration
+
+`calibrate()` simulates an infinite formation of `calibration_material` with 1 % K, 1 ppm U and 1 ppm Th, without a borehole. The gross count rate is converted to API with one factor (counts/s per API), chosen so that a formation with the API-pit mix (4 % K, 13 ppm U, 24 ppm Th) reads 16 K + 8 U + 4 Th API, like a gross-count tool calibrated in the API pit. A formation with a different K/U/Th mix can read a few percent off its 16 K + 8 U + 4 Th value without a borehole, as with a real gross-count tool. The calibration is done once and kept across `set_backfill` calls.
+
+### Monte Carlo method and accuracy
+
+A photon only counts if it reaches the 4 × 10 cm crystal, which most photons emitted in the formation never do. Two weight-compensated (unbiased) techniques concentrate the effort on the photons that matter:
+
+- **Source sampling.** Emission points within `source_radius` (1 m) of the crystal are drawn with density ∝ e^(−s/λ)/s at distance s (λ = `sampling_length`), and each photon carries the weight activity / sampling density. Beyond 1 m the formation contributes well under 1 % (more than ten attenuation lengths).
+- **Weight window.** With the same importance function, photons are split in up to 10 copies as they move towards the crystal and play Russian roulette as they move away. Each copy is scored as its own pulse, and the error is computed per emitted photon, so the correlation between copies is included in `cps_err`.
+
+Together they cut the noise for a given run time severalfold compared with plain sampling. With the default 150 000 events the gross count rate has about 2 % noise per station, and a full 15 m log at 0.1 m (141 stations) takes about a minute on 24 cores. The noise falls as 1/√`events`.
+
+Validation (`tests/test_gamma.py`):
+
+- In an infinite medium the count rate per unit mass concentration does not depend on bulk density, because the emission per volume and the attenuation length scale together. The simulation reproduces this within 1 % from 1.6 to 2.7 g/cm³.
+- A 0.2 m (8") water-filled hole with a centred 50 mm (≈2") tool reduces the gross count rate to 0.76 of the no-hole value; the service-company correction charts give about 0.77 for this case.
+- Without a borehole, mid-bed values match 16 K + 8 U + 4 Th within 2 % (sand, gravel) to 6 % (clay), the spread coming from the single gross-count calibration factor.
+
+### What controls the borehole effect
+
+About 80 % of the gamma-ray signal comes from within 30 cm of the crystal centre. The fill of a 0.2 m hole takes up a large part of that volume, so its effect is strong:
+
+- **Density and composition** of the fill decide how much formation radiation it absorbs. Water absorbs least per centimetre; a dense cement or sand pack absorbs more.
+- **Radioactivity** of the fill adds its own signal. Bentonite grout contains thorium and uranium and can raise the reading in a clean formation while lowering it in a shale.
+- **Hole size and tool position**: bigger holes and centred tools have larger effects. Only a centred tool is modelled.
+- **Water resistivity does not matter.** Salt changes resistivity a hundredfold but density by only a few percent. In a 0.2 m hole in sand, fresh water and seawater (35 g/kg NaCl) both give 0.767 ± 0.006 of the no-hole count rate. A **KCl** brine is different because potassium is radioactive: 5 % KCl (2.6 % K) gives 0.920, i.e. 20 % more than fresh water.

@@ -8,3 +8,6 @@ protocol.txt
 __pycache__/
 *.pyc
 .DS_Store
+
+# Geant4 gamma-ray program build
+gamma/build/

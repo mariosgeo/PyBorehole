@@ -1,14 +1,14 @@
-# PyBorehole: borehole backfill effect on resistivity and induction logs
+# PyBorehole: borehole backfill effect on resistivity, induction and gamma-ray logs
 
-PyBorehole simulates what a borehole **resistivity tool (ERT, PyGIMLi)** and an **electromagnetic induction tool (FDEM, SimPEG)** measure in a backfilled borehole through a layered earth. Both tools are simulated in 3D, with and without the borehole, so you can see how much the backfill distorts each log.
+PyBorehole simulates what a borehole **resistivity tool (ERT, PyGIMLi)**, an **electromagnetic induction tool (FDEM, SimPEG)** and a **natural gamma-ray tool (Monte Carlo, Geant4)** measure in a backfilled borehole through a layered earth. All tools are simulated with and without the borehole, so you can see how much the backfill distorts each log.
 
 You provide:
 
-- the layered earth model (depths and resistivities),
-- the borehole diameter and length, and the backfill resistivity (or several concentric zones such as casing + gravel pack),
+- the layered earth model (depths and resistivities; for the gamma ray also the material and K, U, Th content of each layer),
+- the borehole diameter and length, and the backfill resistivity (or several concentric zones such as casing + gravel pack); for the gamma ray, the backfill material and its radioactivity,
 - the electrode spacings (ERT) and the coil spacings and frequencies (EM).
 
-You get apparent-resistivity logs for every tool, the no-borehole reference logs, and the **borehole effect**: the ratio of the two.
+You get apparent-resistivity and gamma-ray logs for every tool, the no-borehole reference logs, and the **borehole effect**: the ratio of the two.
 
 ![Logs for a 1 Ohm.m backfill](results/combined_log_backfill_1.png)
 
@@ -29,6 +29,32 @@ pip install -r requirements.txt
 ```
 
 Check that `tetgen` is found (`tetgen -h`). If it isn't, ERT meshing fails with `No such file or directory: '...-1.node'`.
+
+**Gamma ray (optional).** The gamma-ray simulation is a small Geant4 program, [`gamma/gammalog.cc`](gamma/gammalog.cc), that is compiled once against your Geant4 install. You need:
+
+1. **Geant4** (tested with 11.4, installed in `C:\Program Files\Geant4-11.4`; set `GEANT4_DIR` if it is elsewhere).
+2. **Visual Studio 2022 with the C++ tools** (it includes CMake and Ninja).
+3. **Three Geant4 data sets**: `G4EMLOW`, `G4ENSDFSTATE` and `PhotonEvaporation` (about 350 MB, from <https://geant4.web.cern.ch/download>, or the URLs listed in `lib/cmake/Geant4/Geant4Config.cmake`). Unpack them into `%USERPROFILE%\geant4-data`, or set `GEANT4_DATA_DIR`.
+
+Then build the program:
+
+```bat
+gamma\build.bat
+```
+
+This writes `gamma\build\gammalog.exe`. If the executable is missing, `run_combined.py` tries to build it. To run without the gamma ray, set `RUN_GAMMA = False`.
+
+**OpenMC check (optional).** `run_combined.py` can repeat the gamma-ray simulation with [OpenMC](https://openmc.org) at a few depths, as an independent check of the Geant4 results. OpenMC does not run natively on Windows, so it runs in WSL:
+
+```bash
+# inside WSL (Ubuntu)
+conda create -n openmc -c conda-forge openmc
+mkdir -p ~/openmc-data && cd ~/openmc-data
+curl -L -o endfb80.tar.xz https://anl.box.com/shared/static/uhbxlrx7hvxqw27psymfbhi7bx7s6u6a.xz   # ENDF/B-VIII.0, 3.4 GB
+tar xJf endfb80.tar.xz && rm endfb80.tar.xz
+```
+
+OpenMC needs the full library (including neutron data) even for a photon-only run. If your environment or data are elsewhere, set `OPENMC_PYTHON` and `OPENMC_CROSS_SECTIONS` (see [`geometry_class/gamma_openmc.py`](geometry_class/gamma_openmc.py)). To skip the check, set `RUN_OPENMC = False`.
 
 ### 2. Edit the settings
 
@@ -70,6 +96,15 @@ OUTPUT_DIR        = "results"               # all figures are written here
 | `EM_FREQUENCIES` | EM frequencies (Hz). |
 | `EM_MEAS_SPACING` | Step of the EM tool along the hole (m). |
 | `EM_MESH_TYPE` | `"cylindrical"` (axisymmetric, a full log in seconds; use this for a centred tool) or `"tree"` (full 3D octree, ~10 s per tool position and frequency; for an off-centre tool, see the user guide). |
+| `RUN_GAMMA` | `False` skips the gamma-ray simulation. |
+| `GR_LAYERS` | One entry per `LAYERS` row: formation `material` (`sand`, `clay`, `gravel`, `limestone`, ...) and radioactivity `K` (%), `U` (ppm), `Th` (ppm) per bulk (wet) mass. |
+| `GR_BACKFILL_SWEEP` | Backfill materials for the gamma ray: name → `material` and `K`, `U`, `Th`. The gamma ray depends on the density, composition and radioactivity of the backfill, not on its resistivity, so it has its own sweep (fresh water vs seawater shows this; KCl brine shows the effect of potassium in the hole). Each entry costs about one minute. |
+| `GR_BACKFILL` | The entry of `GR_BACKFILL_SWEEP` shown next to the resistivity logs. |
+| `GR_MEAS_SPACING` | Step of the gamma-ray tool along the hole (m). |
+| `RUN_OPENMC` | `False` skips the OpenMC check. |
+| `OM_DEPTHS` | Depths (m) of the OpenMC check; `None` = the middle of every layer. |
+| `OM_PARTICLES` | Source photons per OpenMC depth (analog Monte Carlo, about 30 s each on 24 cores; error ~2–3%). |
+| `GR_EVENTS` | Simulated gamma emissions per station and nuclide group. The Monte Carlo noise falls as 1/√`GR_EVENTS`; the default gives about 2% per station. |
 | `OUTPUT_DIR` | Folder for the figures. |
 
 ### 3. Run
@@ -85,8 +120,9 @@ What the script does:
 
 1. **ERT:** builds one 3D mesh (borehole, layers and electrodes are built into it), then solves for the no-borehole reference and for every backfill value in the sweep, reusing the mesh.
 2. **EM:** solves the same model on an axisymmetric cylindrical mesh, with and without the borehole, for every backfill value.
-3. **Plots:** one log figure per backfill value, plus one summary figure of the borehole effect.
-4. **Table:** prints the borehole effect at the middle of every layer.
+3. **Gamma ray:** Geant4 Monte Carlo of a NaI(Tl) tool in the same layers, with no borehole and for every backfill material, in parallel on all CPU cores (a few minutes in total). Then the same problem in OpenMC at the middle of every layer, as an independent check (about 8 minutes).
+4. **Plots:** one log figure per backfill value, one summary figure of the borehole effect, and one gamma-ray figure.
+5. **Tables:** print the borehole effect at the middle of every layer.
 
 ### 4. Read the results
 
@@ -96,6 +132,9 @@ All figures go to `results/`:
 |---|---|
 | `combined_log_backfill_<rho>.png` | One per backfill value. Left: the model. Right: apparent resistivity versus depth for every tool. Solid = with the backfilled hole, dotted = the same tool without a hole, dashed black = true formation resistivity. |
 | `backfill_effect.png` | One panel per tool, one curve per backfill value: ρa(with hole) / ρa(no hole). **1 = no effect**; below 1 the hole makes the tool read too low, above 1 too high. |
+| `gamma_backfill_effect.png` | Gamma ray for every backfill material: the GR log (API), the borehole effect cps(with hole) / cps(no hole), and the apparent K, U and Th. Dotted = no borehole, dashed = true formation values. |
+| `gamma_logs.csv` | The gamma-ray logs as a table, one row per station and backfill. |
+| `gamma_openmc_check.csv` | Geant4 vs OpenMC count rates at the check depths. The OpenMC points are also drawn, with error bars, in `gamma_backfill_effect.png`. |
 
 ![Borehole effect](results/backfill_effect.png)
 
@@ -117,6 +156,21 @@ What these default results show:
 - The **ERT Wenner** array reads too low at short spacing and can *overshoot* the true value at longer spacing (ratio > 1). This is real Wenner behaviour in a conductive hole and matches the analytic solution.
 - A **resistive backfill** (1000 Ohm.m) changes ERT by 4–8% and EM by only 1–5%.
 - When the backfill equals the formation, every ratio is exactly 1, as it should be.
+
+![Gamma-ray borehole effect](results/gamma_backfill_effect.png)
+
+The gamma-ray table (GR in API; ratio = gross count rate with / without the hole):
+
+```
+ depth  GR true  no hole  water  ratio  filter sand  ratio  bentonite  ratio  cement  ratio
+   2.5     55.2     53.4   39.4   0.74         37.2   0.70       54.9   1.03    45.8   0.86
+   7.5    116.0    109.1   87.4   0.80         70.4   0.64       91.4   0.84    77.0   0.71
+  12.5     19.2     19.1   14.6   0.76         17.0   0.89       30.3   1.59    26.3   1.38
+```
+
+- A **water-filled** 0.2 m hole lowers the gamma ray by 20–26 % in every layer: water shields the formation but adds no radiation.
+- A dense, low-activity **filter sand** shields more (down to 0.64 in the clay) but adds a little signal in the clean gravel.
+- **Radioactive backfills** (bentonite, cement) compress the contrast: the clay reads too low, the clean gravel too high (bentonite: ×1.6), and the 100 API clay/gravel contrast drops to about 60 API. In the sand, whose activity is close to the bentonite's, the two effects cancel.
 
 ---
 
@@ -159,7 +213,7 @@ Replace the example spacings and tool diameter with those of your sondes. The ph
 
 ## Using the classes directly
 
-`run_combined.py` is built on two classes you can also use on their own:
+`run_combined.py` is built on three classes you can also use on their own:
 
 ```python
 import numpy as np
@@ -183,6 +237,17 @@ em = EMGeometry(borehole_length=15, borehole_diameter=0.2, layer_1d_geometry=lay
                 backfill_resistivity=10.0, frequencies=[400, 8000], coil_spacings=[0.5, 1.0])
 log    = em.run()                                      # pandas DataFrame
 log_nh = em.run(include_borehole=False)
+
+# Gamma ray (Geant4)
+from geometry_class import GammaGeometry
+gr = GammaGeometry(layers=[(0, 5, dict(material="sand", K=1.2, U=1.5, Th=6.0)),
+                           (5, 10, dict(material="clay", K=2.5, U=3.5, Th=12.0)),
+                           (10, 15, dict(material="gravel", K=0.4, U=0.6, Th=2.0))],
+                   borehole_length=15, borehole_diameter=0.2,
+                   backfill=dict(material="bentonite", K=0.3, U=2.0, Th=8.0))
+gr_log = gr.run()                                      # DataFrame: depth, cps, GR_api, K_app, ...
+gr_nh  = gr.run(include_borehole=False)
+gr.set_backfill(dict(material="water"))                # new backfill
 ```
 
 Instead of a single backfill you can give concentric zones `(outer_radius, resistivity[, top, bottom])`, for example a water-filled PVC casing inside a gravel pack:
@@ -216,6 +281,11 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 | ERT normal (16", 64") and lateral on the axis, 1 Ohm.m backfill | Fourier–Bessel solution | within 0.3% |
 | ERT ring electrodes on a 50 mm insulating tool, normal and lateral, backfill 1 and 1000 Ohm.m | Fourier–Bessel solution with a mandrel | within 0.3% |
 | EM focused tool (bucking receiver), backfill 1–1000 Ohm.m | Fourier–Bessel solution | within 0.2–1.3% |
+| Gamma ray in an infinite medium, bulk density 1.6–2.7 g/cm³ | count rate independent of density (exact for a fixed mass concentration) | within 1% |
+| Gamma ray, 0.2 m water-filled hole, centred 50 mm tool | service-company GR borehole-correction charts (8" hole, 1.0 g/cm³ fluid: ~0.77) | 0.76 |
+| Gamma ray without borehole, thick beds (gross count calibrated to API) | true 16 K + 8 U + 4 Th | within 2% (sand, gravel) to 6% (clay: K/U/Th mix far from the API pit) |
+
+The gamma-ray tests (`tests/test_gamma.py`, about 30 s) are skipped when Geant4 or the program is not available.
 
 ## Limitations
 
@@ -225,19 +295,28 @@ The simulators are checked against exact solutions (`pytest tests/`; add `-m "no
 - Focused induction tools are represented by one bucking receiver per coil pair; commercial tools use their own (often proprietary) coil sets.
 - The default EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree solver handles off-centre tools and transverse coils but takes ~10 s per tool position and frequency, so it is meant for selected depths rather than full logs.
 - EM `real`, `amplitude` and `phase` are not meaningful at these low induction numbers (the in-phase secondary field is ~1e-8 of the primary); use the quadrature (`imag`) or the apparent resistivity.
+- The gamma-ray tool is centred, and its interior above and below the crystal is modelled as air (the photomultiplier and electronics are not modelled). Sources are the main gamma lines of K-40 and of the U and Th series in secular equilibrium. Electrons, positrons and fluorescence photons created outside the crystal are not tracked (their contribution is well under 1%). The gamma-ray logs carry Monte Carlo noise (`cps_err` / `GR_err`, about 2% per station by default).
+- Gamma-ray materials are water-saturated mineral mixtures (`MATERIALS` in `gamma_geometry.py`). The backfill radioactivities in `run_combined.py` are typical values, not measurements; replace them with assays of your own grout or sand if you have them.
 
 ## Repository layout
 
 ```
-run_combined.py               main script: ERT + EM backfill study  <- start here
+run_combined.py               main script: ERT + EM + gamma-ray backfill study  <- start here
 run_realistic.py              the same study with realistic tools (tool body, normal/lateral, focused EM)
 geometry_class/
     geometry.py               ERT: 3D mesh, electrodes, PyGIMLi forward model
     em_geometry.py            EM: cylindrical / octree mesh, SimPEG forward model
     borehole_model.py         shared resistivity model (layers, borehole zones, air)
+    gamma_geometry.py         gamma ray: materials, K/U/Th sources, runs gammalog, calibration to API
+    gamma_openmc.py           the same gamma-ray problem in OpenMC (independent check, runs in WSL)
     analytic.py               exact reference solutions used by the tests
     plotting.py               drawing helpers (tools-in-the-hole close-up)
+gamma/
+    gammalog.cc               Geant4 program: NaI tool in the layered model, Monte Carlo transport
+    CMakeLists.txt, build.bat build it with Visual Studio + Geant4 (output: gamma/build/gammalog.exe)
+    openmc_worker.py          runs the OpenMC jobs inside WSL
 tests/test_validation.py      validation against the analytic solutions
+tests/test_gamma.py           gamma-ray validation (Geant4)
 docs/user_guide.md            full documentation
 results/                      figures written by run_combined.py
 demo.ipynb                    older ERT-only notebook demo

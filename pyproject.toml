@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyborehole"
-version = "0.2.0"
+version = "0.3.0"
 description = "Borehole backfill effect on resistivity (ERT), induction (EM) and natural gamma-ray logs"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,7 +31,8 @@ dependencies = [
 ert = ["pygimli>=1.5", "pyvista>=0.43"]
 em = ["simpeg>=0.22", "discretize>=0.10"]
 test = ["pytest>=7.0"]
-all = ["pyborehole[ert,em,test]"]
+app = ["streamlit>=1.50"]
+all = ["pyborehole[ert,em,app,test]"]
 
 [project.urls]
 Homepage = "https://github.com/mariosgeo/PyBorehole"
@@ -40,6 +41,8 @@ Documentation = "https://github.com/mariosgeo/PyBorehole/blob/main/docs/INSTALL.
 [project.scripts]
 # Compile the Geant4 gamma-ray program after installing (needs Geant4 + a C++ compiler)
 pyborehole-build-gamma = "geometry_class.gamma_geometry:build_gammalog_main"
+# Start the interactive Streamlit app
+pyborehole-app = "geometry_class.launch_app:main"
 
 [tool.setuptools]
 packages = ["geometry_class", "geometry_class.gamma"]

@@ -56,6 +56,7 @@ The extras select what is installed:
 | `pip install pyborehole` | the core (numpy, scipy, pandas, matplotlib): the model, the gamma-ray simulator, the analytic solutions |
 | `pip install "pyborehole[ert]"` | + PyGIMLi and PyVista (ERT) |
 | `pip install "pyborehole[em]"` | + SimPEG and discretize (EM) |
+| `pip install "pyborehole[app]"` | + Streamlit, for the interactive app (`pyborehole-app`) |
 | `pip install "pyborehole[all]"` | everything above + pytest |
 
 **Alternative (Windows): PyGIMLi from its conda channel.** If you prefer PyGIMLi from the `gimli` channel, or already have such an environment, install PyBorehole without the `ert` extra so that pip leaves the conda PyGIMLi alone:

@@ -1,5 +1,9 @@
 # PyBorehole: borehole backfill effect on resistivity, induction and gamma-ray logs
 
+[![PyPI](https://img.shields.io/pypi/v/pyborehole)](https://pypi.org/project/pyborehole/)
+[![Python](https://img.shields.io/pypi/pyversions/pyborehole)](https://pypi.org/project/pyborehole/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/mariosgeo/PyBorehole/blob/main/LICENSE)
+
 PyBorehole simulates what a borehole **resistivity tool (ERT, PyGIMLi)**, an **electromagnetic induction tool (FDEM, SimPEG)** and a **natural gamma-ray tool (Monte Carlo, Geant4)** measure in a backfilled borehole through a layered earth. All tools are simulated with and without the borehole, so you can see how much the backfill distorts each log.
 
 You provide:
@@ -12,11 +16,22 @@ You get apparent-resistivity and gamma-ray logs for every tool, the no-borehole 
 
 ![Logs for a 1 Ohm.m backfill](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/results/combined_log_backfill_1.png)
 
+## Install
+
+```bash
+conda create -n pyborehole -c conda-forge python=3.12 tetgen
+conda activate pyborehole
+pip install "pyborehole[all]"
+pyborehole-build-gamma        # optional: compiles the Geant4 gamma-ray program (needs Geant4)
+```
+
+Geant4 and the optional OpenMC check are installed separately: see the step-by-step **[installation guide](https://github.com/mariosgeo/PyBorehole/blob/main/docs/INSTALL.md)**. The Python package is imported as `geometry_class`.
+
 ---
 
 ## Start here: `run_combined.py`
 
-**[`run_combined.py`](https://github.com/mariosgeo/PyBorehole/blob/main/run_combined.py) is the main file.** It runs the complete study: ERT and EM, with and without the borehole, for a sweep of backfill resistivities, and saves all the figures. Usually you only edit its `SETTINGS` block and run it.
+**[`run_combined.py`](https://github.com/mariosgeo/PyBorehole/blob/main/run_combined.py) is the main file.** It runs the complete study: ERT and EM for a sweep of backfill resistivities, and the gamma ray for a sweep of backfill materials, each with and without the borehole, and saves all the figures. Usually you only edit its `SETTINGS` block and run it.
 
 ### 1. Install
 

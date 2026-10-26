@@ -36,6 +36,10 @@ pyborehole-app                    # after pip install "pyborehole[app]" (include
 streamlit run streamlit_app.py    # or, in a clone of the repository
 ```
 
+[![PyBorehole app demo: add a unit, change its properties and the tools, run EM and gamma ray](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/docs/pyborehole_app_demo.gif)](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/docs/pyborehole_app_demo.mp4)
+
+*Demo at 3× speed: add a unit, give it a lithology and pore water, change the tools, run EM and gamma ray. **[Full video with captions (MP4, 2 min)](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/docs/pyborehole_app_demo.mp4)**.*
+
 The [Streamlit](https://streamlit.io) app opens in the browser with four tabs:
 
 1. **Geometry**: borehole depth and diameter, and the units as a table of top and bottom depths. Each unit gets an identifier (U1, U2, ...) in depth order; gaps and overlaps are reported.
@@ -348,6 +352,7 @@ tests/test_petrophysics.py    Archie's law and the built-in database
 docs/user_guide.md            full documentation
 docs/INSTALL.md               step-by-step installation (Python, Geant4, OpenMC)
 docs/gamma_ray_geant4.docx    how the gamma-ray simulation works (Word)
+docs/pyborehole_app_demo.*    demo of the app (MP4 with captions, GIF preview)
 results/                      figures written by run_combined.py
 demo.ipynb                    older ERT-only notebook demo
 pyproject.toml                package definition (pip install pyborehole)

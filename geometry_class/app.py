@@ -186,6 +186,12 @@ def model_sketch(units: pd.DataFrame, L, D, ax=None, label="id"):
 
 
 init_state()
+# Streamlit deletes the state of widgets that are not drawn in a run, e.g. the unit
+# properties while the unit table is briefly invalid (a new row without a bottom
+# depth yet). Re-assigning the keys makes them user state, which is kept.
+for _k in list(ss.keys()):
+    if _k.startswith(("U", "bf_")):
+        ss[_k] = ss[_k]
 st.title("PyBorehole")
 st.caption("Borehole backfill effect on resistivity (ERT), induction (EM) and natural gamma-ray logs")
 tab1, tab2, tab3, tab4 = st.tabs(["1 · Geometry", "2 · Properties", "3 · Tools", "4 · Run"])
@@ -239,8 +245,8 @@ with tab2:
         for i, uid in enumerate(units["id"]):
             ensure_unit(uid, i)
             u = units.iloc[i]
-            with st.expander(f"**{uid}** — {u.top:g} to {u.bottom:g} m — {ss[f'{uid}_lith']}, "
-                             f"{ss[f'{uid}_water'].lower()} water", expanded=(i == 0)):
+            # the title must not change when the lithology changes, or the panel collapses
+            with st.expander(f"**{uid}** — {u.top:g} to {u.bottom:g} m", expanded=(i == 0)):
                 c1, c2, c3, c4 = st.columns([1.2, 1.2, 1, 1.1])
                 with c1:
                     st.markdown("**Lithology and water**")

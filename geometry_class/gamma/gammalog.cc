@@ -530,9 +530,19 @@ int main(int argc, char** argv) {
       rm->ReinitializeGeometry(true);
     }
     for (size_t g = 0; g < cfg.groups.size(); ++g) {
-      bool active = false;   // any activity of this group in the model at all?
-      for (const auto& l : cfg.layers) active |= l.reg.act[g] > 0;
-      for (const auto& z : cfg.zones) active |= z.reg.act[g] > 0;
+      // Anything of this group radioactive within the source sphere around the
+      // crystal? If not, the count rate is zero; the source could never accept
+      // an emission point and would loop forever (e.g. a thick unit with
+      // K = U = Th = 0).
+      const double d0 = zc - cfg.smax, d1 = zc + cfg.smax;
+      bool active = false;
+      for (size_t i = 0; i < cfg.layers.size(); ++i) {
+        const auto& l = cfg.layers[i];
+        const double bot = (i + 1 == cfg.layers.size()) ? 1e30 : l.bot;
+        if (bot > std::max(d0, 0.0) && l.top < d1) active |= l.reg.act[g] > 0;
+      }
+      if (cfg.holeLen > std::max(d0, 0.0))
+        for (const auto& z : cfg.zones) active |= z.reg.act[g] > 0;
       tally.Reset();
       long trials = 1;
       if (active) {

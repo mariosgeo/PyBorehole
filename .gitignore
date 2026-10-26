@@ -10,4 +10,9 @@ __pycache__/
 .DS_Store
 
 # Geant4 gamma-ray program build
-gamma/build/
+geometry_class/gamma/build/
+
+# Python package builds
+dist/
+build/
+*.egg-info/

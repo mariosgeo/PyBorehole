@@ -3,7 +3,8 @@ Validation of the Geant4 natural gamma-ray simulator.
 
     pytest tests/test_gamma.py        # about a minute on 24 cores
 
-Skipped when gamma/build/gammalog.exe or the Geant4 data sets are missing.
+Skipped when the gammalog program is not built (pyborehole-build-gamma) or the
+Geant4 data sets are missing.
 """
 import os
 import sys
@@ -16,21 +17,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 warnings.filterwarnings("ignore")
 
 from geometry_class.gamma_geometry import (GammaGeometry, GammaMedium, geant4_env,  # noqa: E402
-                                           material_composition, MATERIALS, SOLUTIONS)
-
-_EXE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                    "gamma", "build", "gammalog.exe")
+                                           material_composition, MATERIALS, SOLUTIONS,
+                                           _build_dirs, _EXE_NAME)
 
 
 def _ready():
+    """Data sets found and the program already built (the tests never build it)."""
     try:
         geant4_env()
     except FileNotFoundError:
         return False
-    return os.path.isfile(os.environ.get("GAMMALOG_EXE", _EXE))
+    if "GAMMALOG_EXE" in os.environ:
+        return os.path.isfile(os.environ["GAMMALOG_EXE"])
+    return any(os.path.isfile(os.path.join(d, _EXE_NAME)) for d in _build_dirs())
 
 
-gamma = pytest.mark.skipif(not _ready(), reason="gammalog.exe or Geant4 data not available")
+gamma = pytest.mark.skipif(not _ready(), reason="gammalog or Geant4 data not available")
 UNIT = dict(K=1.0, U=1.0, Th=1.0)
 
 
@@ -73,11 +75,16 @@ def test_water_filled_hole_correction():
 
 
 def _openmc_ready():
+    """OpenMC importable where the worker runs (WSL on Windows, this Python elsewhere)."""
     import subprocess
-    py = os.environ.get("OPENMC_PYTHON", "$HOME/miniforge3/envs/openmc/bin/python")
+    if os.name == "nt":
+        py = os.environ.get("OPENMC_PYTHON", "$HOME/miniforge3/envs/openmc/bin/python")
+        cmd = ["wsl.exe", "-d", os.environ.get("OPENMC_WSL_DISTRO", "Ubuntu"), "--",
+               "bash", "-c", f'"{py}" -c "import openmc"']
+    else:
+        cmd = [os.environ.get("OPENMC_PYTHON", sys.executable), "-c", "import openmc"]
     try:
-        r = subprocess.run(["wsl.exe", "-d", os.environ.get("OPENMC_WSL_DISTRO", "Ubuntu"), "--",
-                            "bash", "-c", f'"{py}" -c "import openmc"'], capture_output=True, timeout=60)
+        r = subprocess.run(cmd, capture_output=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0

@@ -10,8 +10,29 @@ import pygimli as pg
 import pygimli.physics.ert as ert
 import warnings
 import pyvista as pv
+import os
+import shutil
+import sys
 
 from .borehole_model import make_zones, resistivity_rz
+
+
+def _ensure_tetgen_on_path() -> None:
+    """Make the TetGen executable of the active environment findable.
+
+    pgcore 1.6 on Windows prepends its library folder to PATH with ':' instead
+    of ';' when PyGIMLi is imported, which corrupts the first PATH entry (in an
+    activated conda environment usually Library\\bin, where tetgen.exe lives).
+    """
+    if shutil.which("tetgen"):
+        return
+    for d in (os.path.join(sys.prefix, "Library", "bin"), os.path.join(sys.prefix, "bin")):
+        if os.path.isfile(os.path.join(d, "tetgen.exe" if os.name == "nt" else "tetgen")):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return
+
+
+_ensure_tetgen_on_path()
 
 
 class BoundaryMarkers(IntEnum):

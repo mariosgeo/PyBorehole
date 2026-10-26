@@ -24,20 +24,18 @@ exactly the same problem. Only the transport differs:
                     weight window, at the price of many more particles: use a
                     coarser ``measuring_spacing`` (default 0.25 m).
 
-OpenMC does not run natively on Windows. The jobs are run in WSL by
-``gamma/openmc_worker.py``, one process per chunk of stations.
-
-Setup (in WSL)
---------------
-    conda create -n openmc -c conda-forge openmc
-    # ENDF/B-VIII.0 HDF5 library (3.4 GB) from https://openmc.org/data/,
-    # unpacked under ~/openmc-data/ (or set OPENMC_CROSS_SECTIONS)
+The jobs are run by ``gamma/openmc_worker.py``, one process per chunk of
+stations. OpenMC does not run natively on Windows, so there the worker runs
+in WSL; on Linux and macOS it runs directly. Installation: docs/INSTALL.md.
 
 Environment
 -----------
-OPENMC_WSL_DISTRO  WSL distribution (default ``Ubuntu``)
-OPENMC_PYTHON      Python of the OpenMC env inside WSL
-                   (default ``$HOME/miniforge3/envs/openmc/bin/python``)
+OPENMC_PYTHON          Python that has openmc. Windows: inside WSL (default
+                       ``$HOME/miniforge3/envs/openmc/bin/python``); elsewhere:
+                       default is the current Python.
+OPENMC_WSL_DISTRO      WSL distribution (Windows only, default ``Ubuntu``)
+OPENMC_CROSS_SECTIONS  cross_sections.xml of the HDF5 library (default: found
+                       under ~/openmc-data/)
 """
 
 from __future__ import annotations
@@ -45,6 +43,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -57,8 +56,7 @@ from scipy.special import ndtr
 from .gamma_geometry import (API_PIT, API_WEIGHTS, GAMMA_LINES, GROUPS, WINDOWS,
                              GammaGeometry, GammaMedium, material_composition)
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_WORKER = os.path.join(_ROOT, "gamma", "openmc_worker.py")
+_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gamma", "openmc_worker.py")
 
 _FIXED_MATERIALS = {
     "air": {"density": 0.00120479, "elements": {"C": 0.000124, "N": 0.755268, "O": 0.231781,
@@ -66,6 +64,17 @@ _FIXED_MATERIALS = {
     "nai": {"density": 3.667, "elements": {"Na": 0.153373, "I": 0.846627}},
     "steel": {"density": 8.0, "elements": {"Fe": 0.7462, "Cr": 0.1690, "Ni": 0.0848}},
 }
+
+
+def _worker_command(jobs_file: str, results_file: str) -> list:
+    """Command that runs openmc_worker.py: inside WSL on Windows, directly elsewhere."""
+    if os.name == "nt":
+        distro = os.environ.get("OPENMC_WSL_DISTRO", "Ubuntu")
+        python = os.environ.get("OPENMC_PYTHON", "$HOME/miniforge3/envs/openmc/bin/python")
+        cmd = f'"{python}" "{_wsl_path(_WORKER)}" "{_wsl_path(jobs_file)}" "{_wsl_path(results_file)}"'
+        return ["wsl.exe", "-d", distro, "--", "bash", "-c", cmd]
+    python = os.environ.get("OPENMC_PYTHON", sys.executable)
+    return [python, _WORKER, jobs_file, results_file]
 
 
 def _wsl_path(path: str) -> str:
@@ -187,13 +196,11 @@ class OpenMCGammaGeometry(GammaGeometry):
         return out
 
     def _simulate(self, stations, layers, zones, hole_length, groups=GROUPS, particles=None):
-        """Run OpenMC in WSL over the stations; one row per station."""
+        """Run OpenMC over the stations (in WSL on Windows); one row per station."""
         particles = particles or self.particles
         n = max(1, min(self.n_jobs, len(stations)))
         threads = max(1, self.n_jobs // n)
         chunks = [list(range(i, len(stations), n)) for i in range(n)]
-        distro = os.environ.get("OPENMC_WSL_DISTRO", "Ubuntu")
-        python = os.environ.get("OPENMC_PYTHON", "$HOME/miniforge3/envs/openmc/bin/python")
         with tempfile.TemporaryDirectory(prefix="openmc_gr_") as tmp:
             def job(i):
                 jobs = [self._job(stations[k], layers, zones, hole_length, groups, particles,
@@ -201,9 +208,7 @@ class OpenMCGammaGeometry(GammaGeometry):
                 jf, rf = os.path.join(tmp, f"jobs_{i}.json"), os.path.join(tmp, f"res_{i}.json")
                 with open(jf, "w") as fh:
                     json.dump(jobs, fh)
-                cmd = f'"{python}" "{_wsl_path(_WORKER)}" "{_wsl_path(jf)}" "{_wsl_path(rf)}"'
-                r = subprocess.run(["wsl.exe", "-d", distro, "--", "bash", "-c", cmd],
-                                   capture_output=True, text=True)
+                r = subprocess.run(_worker_command(jf, rf), capture_output=True, text=True)
                 if r.returncode != 0:
                     raise RuntimeError(f"OpenMC worker failed:\n{r.stdout[-2000:]}\n{r.stderr[-3000:]}")
                 with open(rf) as fh:

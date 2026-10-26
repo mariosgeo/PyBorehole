@@ -2,7 +2,7 @@
 Validation of the ERT and EM simulators against analytic solutions.
 
     pytest tests/                 # all tests (ERT tests take a few minutes)
-    pytest tests/ -m "not slow"   # EM + model tests only (seconds)
+    pytest tests/ -m "not slow"   # model + cylindrical EM tests (about a minute)
 """
 import os
 import sys
@@ -93,6 +93,7 @@ def test_em_tool_stays_in_borehole():
     np.testing.assert_allclose(df.depth, df.tx_depth + df.spacing / 2)
 
 
+@pytest.mark.slow   # 3D octree solves: several minutes
 def test_em_octree_matches_analytic():
     """3D octree path, centred tool, 1 Ohm.m backfill: within 1.5 % of the borehole solution."""
     em = _em(1.0, mesh_type="tree", frequencies=[400.0])
@@ -103,6 +104,7 @@ def test_em_octree_matches_analytic():
         assert abs(row.imag / hs.imag - 1) < 0.015
 
 
+@pytest.mark.slow   # 3D octree solves: several minutes
 def test_em_octree_offset_homogeneous():
     """Off-centre tool in a homogeneous earth (backfill = formation) still reads 100 Ohm.m."""
     df = _em(100.0, mesh_type="tree", frequencies=[400.0], tool_offset=0.06,

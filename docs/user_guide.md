@@ -304,8 +304,8 @@ ERT measures currents that the electrodes inject directly into the borehole fill
 ## 7. Testing
 
 ```bash
-pytest tests/ -m "not slow"   # model + EM tests, ~15 s
-pytest tests/                 # all tests, ~5 min
+pytest tests/ -m "not slow"   # model + cylindrical EM tests, ~30 s
+pytest tests/                 # all tests; the slow 3D ERT and octree EM tests take a few minutes each
 ```
 
 [`tests/test_validation.py`](../tests/test_validation.py) checks:
@@ -337,13 +337,13 @@ The reference solutions are in [`geometry_class/analytic.py`](../geometry_class/
 | Warning `Electrodes would sit on layer/zone interfaces` | Informational: the electrode grid was shifted by half a step. Pass `electrode_offset=` to choose the positions yourself. |
 | `FileNotFoundError: Geant4 data set G4EMLOW* not found` | The Geant4 data sets aren't installed. Download `G4EMLOW`, `G4ENSDFSTATE` and `PhotonEvaporation` and unpack them in `%USERPROFILE%\geant4-data` (or set `GEANT4_DATA_DIR`). |
 | `G4Exception ... environment variable not set` from `gammalog` | Another Geant4 data set is needed; its name is in the message. Add it to the same folder; `geant4_env()` in `gamma_geometry.py` lists the variables it sets. |
-| `gammalog.exe` fails to start (missing DLL) | The Geant4 `bin` folder must be on `PATH`; `GammaGeometry` adds `GEANT4_DIR\bin` itself. Run `gamma\build.bat` again after a Geant4 upgrade. |
+| `gammalog.exe` fails to start (missing DLL) | The Geant4 `bin` folder must be on `PATH`; `GammaGeometry` adds `GEANT4_DIR\bin` itself. Run `pyborehole-build-gamma` again after a Geant4 upgrade. |
 
 ---
 
 ## 9. Gamma-ray simulator: `GammaGeometry`
 
-`GammaGeometry` ([`geometry_class/gamma_geometry.py`](../geometry_class/gamma_geometry.py)) simulates a natural gamma-ray tool in the same layered earth and borehole, by Monte Carlo photon transport in Geant4. The transport is done by [`gamma/gammalog.cc`](../gamma/gammalog.cc), compiled once with `gamma\build.bat` (see the README for installation).
+`GammaGeometry` ([`geometry_class/gamma_geometry.py`](../geometry_class/gamma_geometry.py)) simulates a natural gamma-ray tool in the same layered earth and borehole, by Monte Carlo photon transport in Geant4. The transport is done by [`geometry_class/gamma/gammalog.cc`](../geometry_class/gamma/gammalog.cc), compiled once with `pyborehole-build-gamma` (see [INSTALL.md](INSTALL.md)).
 
 ### The model
 

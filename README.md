@@ -10,51 +10,40 @@ You provide:
 
 You get apparent-resistivity and gamma-ray logs for every tool, the no-borehole reference logs, and the **borehole effect**: the ratio of the two.
 
-![Logs for a 1 Ohm.m backfill](results/combined_log_backfill_1.png)
+![Logs for a 1 Ohm.m backfill](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/results/combined_log_backfill_1.png)
 
 ---
 
 ## Start here: `run_combined.py`
 
-**[`run_combined.py`](run_combined.py) is the main file.** It runs the complete study: ERT and EM, with and without the borehole, for a sweep of backfill resistivities, and saves all the figures. Usually you only edit its `SETTINGS` block and run it.
+**[`run_combined.py`](https://github.com/mariosgeo/PyBorehole/blob/main/run_combined.py) is the main file.** It runs the complete study: ERT and EM, with and without the borehole, for a sweep of backfill resistivities, and saves all the figures. Usually you only edit its `SETTINGS` block and run it.
 
 ### 1. Install
 
-PyGIMLi needs the `tetgen` mesh generator, which is easiest to get from conda:
+**Full step-by-step instructions, including Geant4, are in [docs/INSTALL.md](https://github.com/mariosgeo/PyBorehole/blob/main/docs/INSTALL.md).** In short:
 
 ```bash
-conda create -n pyborehole -c gimli -c conda-forge python=3.10 pygimli tetgen
+conda create -n pyborehole -c conda-forge python=3.12 tetgen
 conda activate pyborehole
-pip install -r requirements.txt
+pip install "pyborehole[all]"
 ```
+
+TetGen (the 3D mesh generator used for ERT) comes from conda-forge; everything else from pip. Extras: `ert` (PyGIMLi, PyVista), `em` (SimPEG, discretize), `test`, `all`. To run `run_combined.py` or change the code, clone the repository and use `pip install -e ".[all]"` instead.
 
 Check that `tetgen` is found (`tetgen -h`). If it isn't, ERT meshing fails with `No such file or directory: '...-1.node'`.
 
-**Gamma ray (optional).** The gamma-ray simulation is a small Geant4 program, [`gamma/gammalog.cc`](gamma/gammalog.cc), that is compiled once against your Geant4 install. You need:
+**Gamma ray (optional).** The gamma-ray simulation is a small Geant4 program, [`gammalog.cc`](https://github.com/mariosgeo/PyBorehole/blob/main/geometry_class/gamma/gammalog.cc), that pip installs as source and you compile once:
 
-1. **Geant4** (tested with 11.4, installed in `C:\Program Files\Geant4-11.4`; set `GEANT4_DIR` if it is elsewhere).
-2. **Visual Studio 2022 with the C++ tools** (it includes CMake and Ninja).
-3. **Three Geant4 data sets**: `G4EMLOW`, `G4ENSDFSTATE` and `PhotonEvaporation` (about 350 MB, from <https://geant4.web.cern.ch/download>, or the URLs listed in `lib/cmake/Geant4/Geant4Config.cmake`). Unpack them into `%USERPROFILE%\geant4-data`, or set `GEANT4_DATA_DIR`.
+| | Windows | Linux / macOS |
+|---|---|---|
+| Geant4 | installer from <https://geant4.web.cern.ch/download/> into `C:\Program Files\Geant4-11.4` | `conda install -c conda-forge geant4` (plus build tools, see the guide) |
+| Data sets | G4EMLOW, G4ENSDFSTATE, PhotonEvaporation (360 MB) into `%USERPROFILE%\geant4-data` | included with conda-forge |
+| Compiler | Visual Studio 2022, *Desktop development with C++* | conda-forge `cxx-compiler cmake make` |
+| Compile | `pyborehole-build-gamma` | `pyborehole-build-gamma` |
 
-Then build the program:
+Without Geant4, set `RUN_GAMMA = False` in `run_combined.py`.
 
-```bat
-gamma\build.bat
-```
-
-This writes `gamma\build\gammalog.exe`. If the executable is missing, `run_combined.py` tries to build it. To run without the gamma ray, set `RUN_GAMMA = False`.
-
-**OpenMC check (optional).** `run_combined.py` can repeat the gamma-ray simulation with [OpenMC](https://openmc.org) at a few depths, as an independent check of the Geant4 results. OpenMC does not run natively on Windows, so it runs in WSL:
-
-```bash
-# inside WSL (Ubuntu)
-conda create -n openmc -c conda-forge openmc
-mkdir -p ~/openmc-data && cd ~/openmc-data
-curl -L -o endfb80.tar.xz https://anl.box.com/shared/static/uhbxlrx7hvxqw27psymfbhi7bx7s6u6a.xz   # ENDF/B-VIII.0, 3.4 GB
-tar xJf endfb80.tar.xz && rm endfb80.tar.xz
-```
-
-OpenMC needs the full library (including neutron data) even for a photon-only run. If your environment or data are elsewhere, set `OPENMC_PYTHON` and `OPENMC_CROSS_SECTIONS` (see [`geometry_class/gamma_openmc.py`](geometry_class/gamma_openmc.py)). To skip the check, set `RUN_OPENMC = False`.
+**OpenMC check (optional).** An independent check of the gamma ray with [OpenMC](https://openmc.org) (in WSL on Windows) and the 3.4 GB ENDF/B-VIII.0 library; see [docs/INSTALL.md, Part D](https://github.com/mariosgeo/PyBorehole/blob/main/docs/INSTALL.md#part-d-openmc-check-optional). Without it, set `RUN_OPENMC = False`.
 
 ### 2. Edit the settings
 
@@ -136,7 +125,7 @@ All figures go to `results/`:
 | `gamma_logs.csv` | The gamma-ray logs as a table, one row per station and backfill. |
 | `gamma_openmc_check.csv` | Geant4 vs OpenMC count rates at the check depths. The OpenMC points are also drawn, with error bars, in `gamma_backfill_effect.png`. |
 
-![Borehole effect](results/backfill_effect.png)
+![Borehole effect](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/results/backfill_effect.png)
 
 Depth on all plots is the **centre of the tool**: the midpoint of the Wenner array, or the midpoint between the transmitter and receiver coils.
 
@@ -157,7 +146,7 @@ What these default results show:
 - A **resistive backfill** (1000 Ohm.m) changes ERT by 4–8% and EM by only 1–5%.
 - When the backfill equals the formation, every ratio is exactly 1, as it should be.
 
-![Gamma-ray borehole effect](results/gamma_backfill_effect.png)
+![Gamma-ray borehole effect](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/results/gamma_backfill_effect.png)
 
 The gamma-ray table (GR in API; ratio = gross count rate with / without the hole):
 
@@ -176,7 +165,7 @@ The gamma-ray table (GR in API; ratio = gross count rate with / without the hole
 
 ## Realistic tools: `run_realistic.py`
 
-`run_combined.py` uses idealised tools: point electrodes on the borehole axis in a Wenner array, and a plain two-coil EM tool. **[`run_realistic.py`](run_realistic.py)** repeats the backfill study with tools that behave like real logging sondes:
+`run_combined.py` uses idealised tools: point electrodes on the borehole axis in a Wenner array, and a plain two-coil EM tool. **[`run_realistic.py`](https://github.com/mariosgeo/PyBorehole/blob/main/run_realistic.py)** repeats the backfill study with tools that behave like real logging sondes:
 
 | | `run_combined.py` | `run_realistic.py` |
 |---|---|---|
@@ -205,9 +194,9 @@ Outputs in `results/`:
 - `realistic_backfill_effect.png`: with-hole / no-hole ratio per tool.
 - `realistic_logs.csv`: every simulated value (tool, depth, apparent resistivity, backfill; empty backfill = no-borehole reference), plus a printed summary table.
 
-![Realistic tools, 1 Ohm.m backfill](results/realistic_log_backfill_1.png)
+![Realistic tools, 1 Ohm.m backfill](https://raw.githubusercontent.com/mariosgeo/PyBorehole/main/results/realistic_log_backfill_1.png)
 
-Replace the example spacings and tool diameter with those of your sondes. The physics of these tools is described in [docs/user_guide.md](docs/user_guide.md#realistic-tools).
+Replace the example spacings and tool diameter with those of your sondes. The physics of these tools is described in [docs/user_guide.md](https://github.com/mariosgeo/PyBorehole/blob/main/docs/user_guide.md#realistic-tools).
 
 ---
 
@@ -262,13 +251,13 @@ em  = EMGeometry(..., borehole_zones=zones)
 
 (A closed PVC wall blocks the ERT current, as in reality; galvanic tools only see the formation through open hole or a slotted screen.)
 
-**See [docs/user_guide.md](docs/user_guide.md)** for all parameters, outputs, accuracy and run-time settings, the physics, and troubleshooting.
+**See [docs/user_guide.md](https://github.com/mariosgeo/PyBorehole/blob/main/docs/user_guide.md)** for all parameters, outputs, accuracy and run-time settings, the physics, and troubleshooting.
 
 ---
 
 ## Validation
 
-The simulators are checked against exact solutions (`pytest tests/`; add `-m "not slow"` to skip the 3D ERT tests, which take about 5 minutes):
+The simulators are checked against exact solutions (`pytest tests/`; add `-m "not slow"` to skip the 3D ERT and octree EM tests, which take a few minutes each):
 
 | Check | Reference | Result |
 |---|---|---|
@@ -311,13 +300,21 @@ geometry_class/
     gamma_openmc.py           the same gamma-ray problem in OpenMC (independent check, runs in WSL)
     analytic.py               exact reference solutions used by the tests
     plotting.py               drawing helpers (tools-in-the-hole close-up)
-gamma/
-    gammalog.cc               Geant4 program: NaI tool in the layered model, Monte Carlo transport
-    CMakeLists.txt, build.bat build it with Visual Studio + Geant4 (output: gamma/build/gammalog.exe)
-    openmc_worker.py          runs the OpenMC jobs inside WSL
+    gamma/
+        gammalog.cc           Geant4 program: NaI tool in the layered model, Monte Carlo transport
+        CMakeLists.txt        CMake project of the program
+        build.bat, build.sh   compile it (called by pyborehole-build-gamma)
+        openmc_worker.py      runs the OpenMC jobs (inside WSL on Windows)
 tests/test_validation.py      validation against the analytic solutions
-tests/test_gamma.py           gamma-ray validation (Geant4)
+tests/test_gamma.py           gamma-ray validation (Geant4, OpenMC)
 docs/user_guide.md            full documentation
+docs/INSTALL.md               step-by-step installation (Python, Geant4, OpenMC)
+docs/gamma_ray_geant4.docx    how the gamma-ray simulation works (Word)
 results/                      figures written by run_combined.py
 demo.ipynb                    older ERT-only notebook demo
+pyproject.toml                package definition (pip install pyborehole)
 ```
+
+## License
+
+MIT, see [LICENSE](https://github.com/mariosgeo/PyBorehole/blob/main/LICENSE).

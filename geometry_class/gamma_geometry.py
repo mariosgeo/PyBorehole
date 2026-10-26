@@ -11,8 +11,10 @@ layer and each borehole fill zone has a material (bulk composition and
 density) and a radioactivity: potassium K (%), uranium U (ppm) and thorium
 Th (ppm), all per unit bulk (wet) mass.
 
-The Monte Carlo transport runs in ``gamma/gammalog.cc``, a small Geant4
-application compiled against the local Geant4 install (``gamma/build.bat``):
+The Monte Carlo transport runs in ``geometry_class/gamma/gammalog.cc``, a
+small Geant4 application compiled once against the local Geant4 install, with
+the ``pyborehole-build-gamma`` command (or ``build.bat`` / ``build.sh`` in the
+same folder):
 
   * **Tool**      : NaI(Tl) crystal in a steel housing, centred in the hole.
   * **Model**     : axisymmetric stack of coaxial (r, z) tubes: layers,
@@ -55,11 +57,12 @@ GEANT4_DIR       Geant4 install (default ``C:\\Program Files\\Geant4-11.4``)
 GEANT4_DATA_DIR  folder holding the G4EMLOW, G4ENSDFSTATE and
                  PhotonEvaporation data sets (default ``~/geant4-data``);
                  a variable such as G4LEDATA that is already set wins.
-GAMMALOG_EXE     the compiled program (default ``gamma/build/gammalog.exe``)
+GAMMALOG_EXE     the compiled program (default: see ``gammalog_exe``)
 """
 
 from __future__ import annotations
 
+import argparse
 import glob
 import os
 import subprocess
@@ -71,7 +74,8 @@ from typing import Dict, List, Optional, Sequence, Union
 import numpy as np
 import pandas as pd
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GAMMA_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gamma")
+_EXE_NAME = "gammalog.exe" if os.name == "nt" else "gammalog"
 
 # ---------------------------------------------------------------------------
 # Radionuclide data
@@ -211,34 +215,99 @@ def _medium(m: Union[GammaMedium, dict]) -> GammaMedium:
 # ---------------------------------------------------------------------------
 # Running the Geant4 program
 # ---------------------------------------------------------------------------
-def gammalog_exe() -> str:
-    """Path of gammalog.exe, building it with gamma/build.bat if needed."""
-    exe = os.environ.get("GAMMALOG_EXE", os.path.join(_ROOT, "gamma", "build", "gammalog.exe"))
+def _build_dirs() -> List[str]:
+    """Where the program is built: next to its sources if that folder is
+    writable (a git checkout or a user environment), else a per-user folder."""
+    user = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~/.cache")),
+                        "pyborehole", "gammalog-build")
+    pkg = os.path.join(_GAMMA_SRC, "build")
+    return [pkg, user] if os.access(_GAMMA_SRC, os.W_OK) else [user]
+
+
+def build_gammalog(geant4_dir: Optional[str] = None, build_dir: Optional[str] = None) -> str:
+    """Compile the Geant4 gamma-ray program; returns the path of the executable.
+
+    Needs Geant4 and a C++ compiler with CMake (Visual Studio 2022 on Windows,
+    e.g. conda-forge ``cxx-compiler cmake make`` on Linux); see docs/INSTALL.md.
+    """
+    build_dir = build_dir or _build_dirs()[0]
+    os.makedirs(build_dir, exist_ok=True)
+    if os.name == "nt":
+        cmd = ["cmd", "/c", os.path.join(_GAMMA_SRC, "build.bat"), geant4_dir or _geant4_dir(), build_dir]
+    else:
+        cmd = ["bash", os.path.join(_GAMMA_SRC, "build.sh"), geant4_dir or os.environ.get("GEANT4_DIR", ""),
+               build_dir]
+    subprocess.run(cmd, check=True)
+    exe = os.path.join(build_dir, _EXE_NAME)
     if not os.path.isfile(exe):
-        bat = os.path.join(_ROOT, "gamma", "build.bat")
-        print(f"Building {exe} ...")
-        subprocess.run(["cmd", "/c", bat, _geant4_dir()], check=True)
+        raise RuntimeError(f"the build finished but {exe} does not exist")
     return exe
 
 
+def build_gammalog_main(argv: Optional[Sequence[str]] = None) -> None:
+    """Command ``pyborehole-build-gamma``: compile the gamma-ray program."""
+    ap = argparse.ArgumentParser(prog="pyborehole-build-gamma",
+                                 description="Compile the Geant4 gamma-ray program of PyBorehole.")
+    ap.add_argument("--geant4", help="Geant4 install folder (default: $GEANT4_DIR, geant4-config, "
+                                     "or C:\\Program Files\\Geant4-11.4 on Windows)")
+    ap.add_argument("--build-dir", help=f"build folder (default: {_build_dirs()[0]})")
+    a = ap.parse_args(argv)
+    exe = build_gammalog(a.geant4, a.build_dir)
+    print(f"\nOK: {exe}")
+    try:
+        geant4_env()
+        print("Geant4 data sets found.")
+    except FileNotFoundError as err:
+        print(f"WARNING: {err}")
+
+
+def gammalog_exe() -> str:
+    """Path of the gammalog program: $GAMMALOG_EXE, else an existing build
+    (see ``_build_dirs``), else it is built now."""
+    if "GAMMALOG_EXE" in os.environ:
+        return os.environ["GAMMALOG_EXE"]
+    for d in _build_dirs() + [os.path.join(_GAMMA_SRC, "build")]:
+        exe = os.path.join(d, _EXE_NAME)
+        if os.path.isfile(exe):
+            return exe
+    print("The Geant4 gamma-ray program is not built yet; building it now ...")
+    return build_gammalog()
+
+
 def _geant4_dir() -> str:
-    return os.environ.get("GEANT4_DIR", r"C:\Program Files\Geant4-11.4")
+    """Geant4 install prefix: $GEANT4_DIR, else `geant4-config --prefix`, else the Windows default."""
+    if "GEANT4_DIR" in os.environ:
+        return os.environ["GEANT4_DIR"]
+    try:
+        out = subprocess.run(["geant4-config", "--prefix"], capture_output=True, text=True)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except OSError:
+        pass
+    return r"C:\Program Files\Geant4-11.4" if os.name == "nt" else "/usr/local"
 
 
 def geant4_env() -> dict:
-    """Environment with the Geant4 DLLs on PATH and the data sets located."""
+    """Environment with the Geant4 libraries on PATH and the data sets located.
+
+    Data sets are taken from G4LEDATA etc. if set, else searched in
+    $GEANT4_DATA_DIR, ~/geant4-data and <Geant4 prefix>/share/Geant4/data.
+    """
     env = dict(os.environ)
-    env["PATH"] = os.path.join(_geant4_dir(), "bin") + os.pathsep + env.get("PATH", "")
-    data = os.environ.get("GEANT4_DATA_DIR", os.path.join(os.path.expanduser("~"), "geant4-data"))
-    for var, pattern in (("G4LEDATA", "G4EMLOW*"), ("G4ENSDFSTATEDATA", "G4ENSDFSTATE*"),
+    g4 = _geant4_dir()
+    env["PATH"] = os.path.join(g4, "bin") + os.pathsep + env.get("PATH", "")
+    dirs = [os.environ.get("GEANT4_DATA_DIR", ""), os.path.join(os.path.expanduser("~"), "geant4-data"),
+            os.path.join(g4, "share", "Geant4", "data")]
+    # folder names: G4EMLOW8.8 (CERN tarballs) or EMLOW8.8 (conda-forge)
+    for var, pattern in (("G4LEDATA", "*EMLOW*"), ("G4ENSDFSTATEDATA", "*ENSDFSTATE*"),
                          ("G4LEVELGAMMADATA", "PhotonEvaporation*")):
         if var in env:
             continue
-        found = sorted(glob.glob(os.path.join(data, pattern)))
+        found = sorted(f for d in dirs if d for f in glob.glob(os.path.join(d, pattern)))
         if not found:
             raise FileNotFoundError(
-                f"Geant4 data set {pattern} not found in {data}. Download it from "
-                f"https://geant4.web.cern.ch/download and set GEANT4_DATA_DIR or {var}.")
+                f"Geant4 data set {pattern} not found in {[d for d in dirs if d]}. "
+                f"See docs/INSTALL.md, or set GEANT4_DATA_DIR or {var}.")
         env[var] = found[-1]
     return env
 

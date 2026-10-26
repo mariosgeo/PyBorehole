@@ -20,4 +20,4 @@ from .em_geometry import EMGeometry
 from .gamma_geometry import GammaGeometry, GammaMedium, build_gammalog
 from .gamma_openmc import OpenMCGammaGeometry
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

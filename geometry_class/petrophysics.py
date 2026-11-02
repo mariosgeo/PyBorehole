@@ -8,52 +8,60 @@ the rock-physics relations that turn them into the inputs of the simulators:
 bulk resistivity (ERT, EM), and material, bulk density and K, U, Th (gamma
 ray).
 
-Bulk resistivity follows Archie's law, with an optional surface-conduction
-term for clay-bearing units:
+Bulk resistivity follows the Waxman-Smits (1968) model for shaly sediments:
 
-    sigma_bulk = Sw**n * phi**m / (a * rho_w)  +  sigma_s
+    sigma_bulk = (phi**m * Sw**n / a) * (sigma_w + B * Qv / Sw)
     rho_bulk   = 1 / sigma_bulk
 
-``sigma_s`` = 0 gives Archie's law exactly (clean sand, gravel, sandstone,
-limestone). Archie's law assumes that current flows through the pore water
-only; clay minerals also conduct along their surfaces, so plain Archie
-overestimates the resistivity of clays several-fold in fresh water (a clay
-with 45 % porosity and 20 Ohm.m water would be ~115 Ohm.m instead of the
-~5-20 Ohm.m measured). ``sigma_s`` adds that conduction in parallel, the
-simplest form of the Waxman-Smits idea.
+    Qv = CEC/100 * rho_grain * (1 - phi) / phi        [meq/cm3 of pore volume]
+    B  = 4.6 * (1 - 0.6 * exp(-0.77 / rho_w))         [(S/m) per (meq/cm3), 25 C]
 
-The values are typical values for orientation, not measurements: Archie
-parameters from common practice for unconsolidated (m ~ 1.3-1.6) and
-consolidated (m ~ 2) sediments, K/U/Th from the compilation in
-docs/gamma_ray_geant4.docx (IAEA-TECDOC-1363, Dickson & Scott 1997, Ellis &
-Singer 2007).
+with sigma_w = 1/rho_w the pore-water conductivity, CEC the cation-exchange
+capacity of the solids (meq/100 g), Qv the exchange cations per unit pore
+volume and B their equivalent conductance (Waxman & Smits 1968; the B fit is
+theirs, at 25 C). Clay minerals conduct along their surfaces through these
+counter-ions, in parallel with the pore water; Archie's law ignores it and
+overestimates the resistivity of clays several-fold in fresh water (a clay
+with 45 % porosity and 20 Ohm.m water would be ~100 Ohm.m instead of the
+~5-20 Ohm.m measured). Unlike a constant surface conductivity, the clay term
+grows with salinity through B and with decreasing saturation through 1/Sw.
+CEC = 0 gives Archie's law exactly (clean sand, gravel, sandstone, limestone).
+
+The values are typical values for orientation, not measurements: exponents
+from common practice for unconsolidated (m ~ 1.3-1.6) and consolidated
+(m ~ 2) sediments, CEC typical of the clay content (kaolinite 3-15, illite
+10-40, smectite 80-150 meq/100 g as pure minerals), K/U/Th from the
+compilation in docs/gamma_ray_geant4.docx (IAEA-TECDOC-1363, Dickson & Scott
+1997, Ellis & Singer 2007).
 """
 from __future__ import annotations
 
+import math
 from typing import Dict, Optional
 
 # ---------------------------------------------------------------------------
 # Lithologies
 # ---------------------------------------------------------------------------
-# porosity phi (-), grain density (g/cm3), Archie a, m, n, surface conductivity
-# sigma_s (S/m), K (%), U (ppm), Th (ppm), and the gamma-ray material preset
-# (MATERIALS in gamma_geometry.py) that sets the element composition.
+# porosity phi (-), grain density (g/cm3), Waxman-Smits a, m, n (= Archie's
+# for clean rock), cation-exchange capacity cec (meq/100 g of solids), K (%),
+# U (ppm), Th (ppm), and the gamma-ray material preset (MATERIALS in
+# gamma_geometry.py) that sets the element composition.
 LITHOLOGIES: Dict[str, dict] = {
-    "Gravel":      dict(porosity=0.25, grain_density=2.65, a=1.0, m=1.3, n=2.0, sigma_s=0.000,
+    "Gravel":      dict(porosity=0.25, grain_density=2.65, a=1.0, m=1.3, n=2.0, cec=0.0,
                         K=0.4, U=0.6, Th=2.0, gamma_material="gravel"),
-    "Sand":        dict(porosity=0.32, grain_density=2.65, a=1.0, m=1.3, n=2.0, sigma_s=0.000,
+    "Sand":        dict(porosity=0.32, grain_density=2.65, a=1.0, m=1.3, n=2.0, cec=0.0,
                         K=0.6, U=0.8, Th=2.5, gamma_material="sand"),
-    "Silty sand":  dict(porosity=0.32, grain_density=2.66, a=1.0, m=1.5, n=2.0, sigma_s=0.003,
+    "Silty sand":  dict(porosity=0.32, grain_density=2.66, a=1.0, m=1.5, n=2.0, cec=0.5,
                         K=1.2, U=1.5, Th=6.0, gamma_material="sand"),
-    "Silt":        dict(porosity=0.38, grain_density=2.68, a=1.0, m=1.6, n=2.0, sigma_s=0.010,
+    "Silt":        dict(porosity=0.38, grain_density=2.68, a=1.0, m=1.6, n=2.0, cec=2.0,
                         K=1.8, U=2.5, Th=8.0, gamma_material="sand"),
-    "Clay":        dict(porosity=0.45, grain_density=2.70, a=1.0, m=2.0, n=2.0, sigma_s=0.080,
+    "Clay":        dict(porosity=0.45, grain_density=2.70, a=1.0, m=2.0, n=2.0, cec=10.0,
                         K=2.5, U=3.5, Th=12.0, gamma_material="clay"),
-    "Glacial till": dict(porosity=0.20, grain_density=2.70, a=1.0, m=1.6, n=2.0, sigma_s=0.010,
+    "Glacial till": dict(porosity=0.20, grain_density=2.70, a=1.0, m=1.6, n=2.0, cec=2.0,
                          K=1.8, U=2.0, Th=8.0, gamma_material="sand"),
-    "Sandstone":   dict(porosity=0.18, grain_density=2.65, a=1.0, m=2.0, n=2.0, sigma_s=0.000,
+    "Sandstone":   dict(porosity=0.18, grain_density=2.65, a=1.0, m=2.0, n=2.0, cec=0.0,
                         K=0.3, U=0.6, Th=2.0, gamma_material="sand"),
-    "Limestone":   dict(porosity=0.12, grain_density=2.71, a=1.0, m=2.0, n=2.0, sigma_s=0.000,
+    "Limestone":   dict(porosity=0.12, grain_density=2.71, a=1.0, m=2.0, n=2.0, cec=0.0,
                         K=0.3, U=2.0, Th=1.5, gamma_material="limestone"),
 }
 
@@ -73,29 +81,79 @@ WATERS: Dict[str, dict] = {
 # ---------------------------------------------------------------------------
 # resistivity (Ohm.m) for ERT/EM; for the gamma ray the material preset and
 # K, U, Th per bulk mass. "Filter sand" resistivity depends on its pore water
-# and is computed with Archie's law from the chosen water.
+# and is computed with Waxman-Smits (clean sand: CEC = 0, i.e. Archie) from the
+# chosen water.
 BACKFILLS: Dict[str, dict] = {
-    "Water":           dict(resistivity=None, archie=None, gamma_material="water",
+    "Water":           dict(resistivity=None, ws=None, gamma_material="water",
                             K=0.0, U=0.0, Th=0.0, note="resistivity = that of the chosen water"),
-    "Filter sand":     dict(resistivity=None, archie=dict(porosity=0.35, a=1.0, m=1.3, n=2.0, sigma_s=0.0),
+    "Filter sand":     dict(resistivity=None, ws=dict(porosity=0.35, a=1.0, m=1.3, n=2.0, cec=0.0),
                             gamma_material="sand_pack", K=0.3, U=0.5, Th=1.5,
-                            note="water-saturated quartz sand; Archie with the chosen water"),
-    "Bentonite grout": dict(resistivity=3.0, archie=None, gamma_material="bentonite",
+                            note="water-saturated quartz sand; Waxman-Smits (CEC 0 = Archie) with the chosen water"),
+    "Bentonite grout": dict(resistivity=3.0, ws=None, gamma_material="bentonite",
                             K=0.3, U=2.0, Th=8.0, note="~1.4 g/cm3; conductive and thorium-rich"),
-    "Cement grout":    dict(resistivity=20.0, archie=None, gamma_material="cement",
+    "Cement grout":    dict(resistivity=20.0, ws=None, gamma_material="cement",
                             K=0.35, U=2.0, Th=4.0, note="~1.85 g/cm3; resistivity rises as it cures"),
 }
 
 
-def archie_resistivity(rho_w: float, porosity: float, a: float = 1.0, m: float = 2.0,
-                       n: float = 2.0, sw: float = 1.0, sigma_s: float = 0.0) -> float:
-    """Bulk resistivity (Ohm.m) from Archie's law plus surface conduction.
-
-    sigma = Sw**n * phi**m / (a * rho_w) + sigma_s ;  rho = 1 / sigma
-    """
+def _check(rho_w: float, porosity: float, sw: float, a: float) -> None:
     if rho_w <= 0 or not (0 < porosity <= 1) or not (0 < sw <= 1) or a <= 0:
         raise ValueError("need rho_w > 0, 0 < porosity <= 1, 0 < Sw <= 1 and a > 0")
+
+
+def archie_resistivity(rho_w: float, porosity: float, a: float = 1.0, m: float = 2.0,
+                       n: float = 2.0, sw: float = 1.0, sigma_s: float = 0.0) -> float:
+    """Bulk resistivity (Ohm.m) from Archie's law, optionally with a constant
+    surface conductivity sigma_s (S/m) in parallel.
+
+    sigma = Sw**n * phi**m / (a * rho_w) + sigma_s ;  rho = 1 / sigma
+
+    Kept for clean rock and for compatibility; the database and the app use
+    ``waxman_smits_resistivity``, which reduces to this with CEC = 0.
+    """
+    _check(rho_w, porosity, sw, a)
     sigma = sw ** n * porosity ** m / (a * rho_w) + max(sigma_s, 0.0)
+    return 1.0 / sigma
+
+
+def waxman_smits_b(rho_w: float) -> float:
+    """Equivalent counter-ion conductance B ((S/m) per meq/cm3) at 25 C.
+
+    B = 4.6 * (1 - 0.6 * exp(-0.77 / rho_w))  (Waxman & Smits 1968):
+    about 4.6 in brines, falling to about 1.9 in fresh water.
+    """
+    if rho_w <= 0:
+        raise ValueError("rho_w must be positive")
+    return 4.6 * (1.0 - 0.6 * math.exp(-0.77 / rho_w))
+
+
+def qv_from_cec(cec: float, porosity: float, grain_density: float = 2.65) -> float:
+    """Exchange cations per unit pore volume Qv (meq/cm3) from the CEC (meq/100 g of solids).
+
+    Qv = CEC/100 * rho_grain * (1 - phi) / phi
+    """
+    if cec < 0 or not (0 < porosity < 1) or grain_density <= 0:
+        raise ValueError("need CEC >= 0, 0 < porosity < 1 and grain density > 0")
+    return cec / 100.0 * grain_density * (1.0 - porosity) / porosity
+
+
+def waxman_smits_resistivity(rho_w: float, porosity: float, a: float = 1.0, m: float = 2.0,
+                             n: float = 2.0, sw: float = 1.0, cec: float = 0.0,
+                             grain_density: float = 2.65, b: Optional[float] = None) -> float:
+    """Bulk resistivity (Ohm.m) from the Waxman-Smits model.
+
+    sigma = (phi**m * Sw**n / a) * (1/rho_w + B * Qv / Sw) ;  rho = 1 / sigma
+
+    m and n are the Waxman-Smits exponents (m*, n*); Qv comes from ``cec``
+    (``qv_from_cec``) and B from ``waxman_smits_b`` unless given. CEC = 0 is
+    Archie's law exactly.
+    """
+    _check(rho_w, porosity, sw, a)
+    if porosity >= 1:
+        raise ValueError("porosity must be below 1 for Waxman-Smits")
+    qv = qv_from_cec(cec, porosity, grain_density)
+    b = waxman_smits_b(rho_w) if b is None else b
+    sigma = porosity ** m * sw ** n / a * (1.0 / rho_w + b * qv / sw)
     return 1.0 / sigma
 
 
@@ -115,8 +173,8 @@ def backfill_resistivity(name: str, rho_w: float) -> float:
     bf = BACKFILLS[name]
     if bf["resistivity"] is not None:
         return bf["resistivity"]
-    if bf["archie"] is not None:
-        return archie_resistivity(rho_w, **bf["archie"])
+    if bf["ws"] is not None:
+        return waxman_smits_resistivity(rho_w, **bf["ws"])
     return rho_w
 
 
@@ -126,8 +184,10 @@ def unit_properties(lithology: str, water: str, sw: float = 1.0,
     lit, wat = LITHOLOGIES[lithology], WATERS[water]
     rho_w = wat["rho_w"] if rho_w is None else rho_w
     props = dict(lit, rho_w=rho_w, sw=sw)
-    props["resistivity"] = archie_resistivity(rho_w, lit["porosity"], lit["a"], lit["m"], lit["n"],
-                                              sw, lit["sigma_s"])
+    props["qv"] = qv_from_cec(lit["cec"], lit["porosity"], lit["grain_density"])
+    props["B"] = waxman_smits_b(rho_w)
+    props["resistivity"] = waxman_smits_resistivity(rho_w, lit["porosity"], lit["a"], lit["m"], lit["n"],
+                                                    sw, lit["cec"], lit["grain_density"])
     props["density"] = bulk_density(lit["porosity"], lit["grain_density"], sw, wat["density"])
     props["api"] = gamma_api(lit["K"], lit["U"], lit["Th"])
     return props

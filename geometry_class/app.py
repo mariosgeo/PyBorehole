@@ -7,7 +7,7 @@ PyBorehole - interactive borehole log simulator (Streamlit app).
 Tabs:
   1. Geometry   - borehole and the depth intervals of the units (IDs U1, U2, ...)
   2. Properties - per unit: lithology and pore water from the built-in database,
-                  Archie parameters -> bulk resistivity, K/U/Th, density; the borehole fill
+                  Waxman-Smits parameters -> bulk resistivity, K/U/Th, density; the borehole fill
   3. Tools      - ERT array, EM coils and frequencies, gamma-ray probe
   4. Run        - choose ERT / EM / gamma ray, run, plot the logs and the borehole effect
 """
@@ -33,7 +33,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from geometry_class.petrophysics import (BACKFILLS, LITHOLOGIES, WATERS, archie_resistivity,
+from geometry_class.petrophysics import (BACKFILLS, LITHOLOGIES, WATERS, qv_from_cec, waxman_smits_b,
+                                         waxman_smits_resistivity,
                                          backfill_resistivity, bulk_density, gamma_api)
 
 st.set_page_config(page_title="PyBorehole", page_icon="🕳️", layout="wide")
@@ -91,7 +92,7 @@ def load_unit_defaults(uid, lith=None, water=None):
     L = LITHOLOGIES[lith]
     ss[f"{uid}_lith"], ss[f"{uid}_water"] = lith, water
     ss[f"{uid}_rhow"] = WATERS[water]["rho_w"]
-    for k in ("porosity", "a", "m", "n", "sigma_s", "grain_density", "K", "U", "Th"):
+    for k in ("porosity", "a", "m", "n", "cec", "grain_density", "K", "U", "Th"):
         ss[f"{uid}_{k}"] = float(L[k])
     ss.setdefault(f"{uid}_sw", 1.0)
     ss.setdefault(f"{uid}_override", False)
@@ -138,11 +139,13 @@ def unit_table(units: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, u in units.iterrows():
         g = lambda k: ss[f"{u.id}_{k}"]
-        rho_archie = archie_resistivity(g("rhow"), g("porosity"), g("a"), g("m"), g("n"), g("sw"), g("sigma_s"))
-        rho = g("rho_manual") if g("override") else rho_archie
+        rho_ws = waxman_smits_resistivity(g("rhow"), g("porosity"), g("a"), g("m"), g("n"), g("sw"),
+                                          g("cec"), g("grain_density"))
+        rho = g("rho_manual") if g("override") else rho_ws
         rows.append(dict(id=u.id, top=u.top, bottom=u.bottom, lithology=g("lith"), water=g("water"),
                          rho_w=g("rhow"), porosity=g("porosity"), sw=g("sw"), a=g("a"), m=g("m"), n=g("n"),
-                         sigma_s=g("sigma_s"), rho_archie=rho_archie, resistivity=rho,
+                         cec=g("cec"), qv=qv_from_cec(g("cec"), g("porosity"), g("grain_density")),
+                         B=waxman_smits_b(g("rhow")), rho_ws=rho_ws, resistivity=rho,
                          density=bulk_density(g("porosity"), g("grain_density"), g("sw"),
                                               WATERS[g("water")]["density"]),
                          K=g("K"), U=g("U"), Th=g("Th"), api=gamma_api(g("K"), g("U"), g("Th")),
@@ -238,10 +241,10 @@ with tab2:
         st.warning("Fix the unit geometry in tab 1 first.")
     else:
         st.write("Pick a lithology and a pore water for each unit: the database fills in the values, which you "
-                 "can then change. Bulk resistivity follows **Archie's law** with a surface-conduction term "
-                 "for clay-bearing units:  "
-                 r"$\sigma = S_w^{\,n}\,\phi^{\,m} / (a\,\rho_w) + \sigma_s$,  $\rho = 1/\sigma$.  "
-                 "Set σₛ = 0 for pure Archie.")
+                 "can then change. Bulk resistivity follows the **Waxman-Smits** model for shaly sediments:  "
+                 r"$\sigma = \dfrac{\phi^{\,m} S_w^{\,n}}{a}\left(\dfrac{1}{\rho_w} + \dfrac{B\,Q_v}{S_w}\right)$,  "
+                 r"$\rho = 1/\sigma$, with $Q_v = \mathrm{CEC}/100\cdot\rho_g(1-\phi)/\phi$ and "
+                 r"$B = 4.6\,(1 - 0.6\,e^{-0.77/\rho_w})$.  CEC = 0 is Archie's law (clean sand, gravel).")
         for i, uid in enumerate(units["id"]):
             ensure_unit(uid, i)
             u = units.iloc[i]
@@ -260,16 +263,17 @@ with tab2:
                     st.number_input("Water saturation Sw (-)", min_value=0.05, max_value=1.0, step=0.05,
                                     key=f"{uid}_sw", help="1 = below the water table")
                 with c2:
-                    st.markdown("**Archie parameters**")
+                    st.markdown("**Waxman-Smits parameters**")
                     st.number_input("Porosity φ (-)", min_value=0.01, max_value=0.9, step=0.01,
                                     key=f"{uid}_porosity")
                     st.number_input("Tortuosity a (-)", min_value=0.1, max_value=5.0, step=0.1, key=f"{uid}_a")
                     st.number_input("Cementation m (-)", min_value=1.0, max_value=4.0, step=0.1, key=f"{uid}_m")
                     st.number_input("Saturation exponent n (-)", min_value=1.0, max_value=4.0, step=0.1,
                                     key=f"{uid}_n")
-                    st.number_input("Surface conductivity σₛ (S/m)", min_value=0.0, max_value=1.0,
-                                    step=0.005, format="%.3f", key=f"{uid}_sigma_s",
-                                    help="Clay surface conduction; 0 = pure Archie")
+                    st.number_input("Cation-exchange capacity CEC (meq/100 g)", min_value=0.0, max_value=150.0,
+                                    step=0.5, format="%.1f", key=f"{uid}_cec",
+                                    help="Clay surface conduction. 0 = clean sand (Archie); silt ~2, clay ~10; "
+                                         "pure minerals: kaolinite 3-15, illite 10-40, smectite 80-150")
                 with c3:
                     st.markdown("**Gamma ray**")
                     st.number_input("K (%)", min_value=0.0, max_value=60.0, step=0.1, key=f"{uid}_K")
@@ -280,7 +284,8 @@ with tab2:
                 with c4:
                     t = unit_table(units.iloc[[i]]).iloc[0]
                     st.markdown("**Result**")
-                    st.metric("Archie bulk resistivity", f"{t.rho_archie:.3g} Ω·m")
+                    st.metric("Waxman-Smits bulk resistivity", f"{t.rho_ws:.3g} Ω·m")
+                    st.caption(f"Qv = {t.qv:.3f} meq/cm³, B = {t.B:.2f} (S/m)/(meq/cm³)")
                     st.checkbox("Override resistivity", key=f"{uid}_override")
                     if ss[f"{uid}_override"]:
                         st.number_input("Resistivity used (Ω·m)", min_value=0.01, key=f"{uid}_rho_manual")
@@ -307,10 +312,11 @@ with tab2:
 
         st.subheader("Summary")
         tbl = unit_table(units)
-        st.dataframe(tbl[["id", "top", "bottom", "lithology", "water", "rho_w", "porosity", "m", "sigma_s",
+        st.dataframe(tbl[["id", "top", "bottom", "lithology", "water", "rho_w", "porosity", "m", "cec", "qv",
                           "resistivity", "density", "K", "U", "Th", "api"]].round(3),
                      width="stretch", hide_index=True,
-                     column_config={"rho_w": "ρw (Ω·m)", "resistivity": "ρ bulk (Ω·m)",
+                     column_config={"rho_w": "ρw (Ω·m)", "cec": "CEC (meq/100 g)", "qv": "Qv (meq/cm³)",
+                                    "resistivity": "ρ bulk (Ω·m)",
                                     "density": "ρ bulk (g/cm³)", "api": "GR (API)"})
         with st.expander("Built-in database"):
             st.markdown("**Lithologies** (typical values; replace them with local data when available)")
@@ -318,7 +324,7 @@ with tab2:
             st.markdown("**Pore waters**")
             st.dataframe(pd.DataFrame(WATERS).T, width="stretch")
             st.markdown("**Borehole fills**")
-            st.dataframe(pd.DataFrame(BACKFILLS).T.drop(columns="archie"), width="stretch")
+            st.dataframe(pd.DataFrame(BACKFILLS).T.drop(columns="ws"), width="stretch")
 
 # ===========================================================================
 # Tab 3: tools

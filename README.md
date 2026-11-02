@@ -43,7 +43,7 @@ streamlit run streamlit_app.py    # or, in a clone of the repository
 The [Streamlit](https://streamlit.io) app opens in the browser with four tabs:
 
 1. **Geometry**: borehole depth and diameter, and the units as a table of top and bottom depths. Each unit gets an identifier (U1, U2, ...) in depth order; gaps and overlaps are reported.
-2. **Properties**: for each unit, a lithology (gravel, sand, silty sand, silt, clay, glacial till, sandstone, limestone) and a pore water (fresh, brackish, salt) from the built-in database ([`petrophysics.py`](https://github.com/mariosgeo/PyBorehole/blob/main/geometry_class/petrophysics.py)). The values (porosity, Archie a, m, n, K, U, Th, grain density) can then be edited. The bulk resistivity follows **Archie's law** with an optional clay surface-conduction term, σ = Sw<sup>n</sup> φ<sup>m</sup> / (a ρw) + σs (σs = 0 is pure Archie; plain Archie overestimates clays several-fold in fresh water), and can be overridden. The borehole fill (water, filter sand, bentonite or cement grout) is set here too.
+2. **Properties**: for each unit, a lithology (gravel, sand, silty sand, silt, clay, glacial till, sandstone, limestone) and a pore water (fresh, brackish, salt) from the built-in database ([`petrophysics.py`](https://github.com/mariosgeo/PyBorehole/blob/main/geometry_class/petrophysics.py)). The values (porosity, a, m, n, cation-exchange capacity CEC, K, U, Th, grain density) can then be edited. The bulk resistivity follows the **Waxman–Smits** model for shaly sediments, σ = (φ<sup>m</sup> Sw<sup>n</sup> / a) · (1/ρw + B·Qv / Sw), with Qv = CEC/100 · ρgrain (1 − φ)/φ the exchange cations per pore volume and B = 4.6 [1 − 0.6 exp(−0.77/ρw)] their conductance (Waxman & Smits 1968). Clay conduction thus grows with salinity and with decreasing saturation; CEC = 0 is Archie's law (clean sand, gravel). Plain Archie would overestimate a clay in fresh water more than tenfold (99 instead of 7 Ω·m for the database clay). The resistivity can also be overridden. The borehole fill (water, filter sand, bentonite or cement grout) is set here too.
 3. **Tools**: ERT array (Wenner, normal or lateral) with its spacings and an optional insulating tool body; EM coil spacings and frequencies; gamma-ray probe size and statistics.
 4. **Run**: tick ERT, EM and/or gamma ray (unavailable simulators are greyed out with the reason) and run. The app plots the model next to the resistivity and gamma-ray logs, with and without the borehole, the borehole effect per tool, and a table of the effect in the middle of each unit; the logs can be downloaded as CSV.
 
@@ -365,7 +365,7 @@ geometry_class/
     gamma_openmc.py           the same gamma-ray problem in OpenMC (independent check, runs in WSL)
     analytic.py               exact reference solutions used by the tests
     plotting.py               drawing helpers (tools-in-the-hole close-up)
-    petrophysics.py           built-in lithology / water / fill database, Archie's law
+    petrophysics.py           built-in lithology / water / fill database, Waxman-Smits model
     study.py                  runs ERT, EM and gamma ray for one model (used by the app)
     app.py, launch_app.py     the Streamlit app and the pyborehole-app command
     gamma/
@@ -375,7 +375,7 @@ geometry_class/
         openmc_worker.py      runs the OpenMC jobs (inside WSL on Windows)
 tests/test_validation.py      validation against the analytic solutions
 tests/test_gamma.py           gamma-ray validation (Geant4, OpenMC)
-tests/test_petrophysics.py    Archie's law and the built-in database
+tests/test_petrophysics.py    Waxman-Smits / Archie and the built-in database
 docs/user_guide.md            full documentation
 docs/INSTALL.md               step-by-step installation (Python, Geant4, OpenMC)
 docs/gamma_ray_geant4.docx    how the gamma-ray simulation works (Word)

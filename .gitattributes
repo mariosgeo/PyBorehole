@@ -1,3 +1,7 @@
+# Store text files with LF in the repository; Windows checkouts get CRLF.
+# Stops line-ending-only changes (e.g. from syncing between Windows and macOS)
+# from showing up as modifications.
+* text=auto
 # Shell scripts must keep LF endings to run on Linux / macOS / WSL
 *.sh text eol=lf
 # Windows batch files need CRLF

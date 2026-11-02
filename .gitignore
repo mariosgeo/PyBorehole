@@ -25,3 +25,6 @@ build/
 /plc.vtk
 /mesh*.bms
 /docs/*_preview.pdf
+
+# Office lock files
+~$*

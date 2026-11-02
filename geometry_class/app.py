@@ -374,6 +374,29 @@ with tab3:
 # Tab 4: run
 # ===========================================================================
 @st.cache_resource
+def memory_gb():
+    """Memory this process may use (GB): the container limit if there is one
+    (e.g. on Streamlit Community Cloud), else the machine's RAM; None if unknown."""
+    sizes = []
+    for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            v = open(f).read().strip()
+            if v.isdigit() and int(v) < 1 << 60:
+                sizes.append(int(v))
+        except OSError:
+            pass
+    try:
+        sizes.append(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
+    except (AttributeError, ValueError, OSError):
+        pass
+    return min(sizes) / 1e9 if sizes else None
+
+
+# The 3D ERT solve needs several GB; below this the app could be killed for
+# every visitor (Streamlit Community Cloud gives about 2.7 GB).
+ERT_MIN_GB = float(os.environ.get("PYBOREHOLE_ERT_MIN_GB", "6"))
+
+
 def availability():
     """Which simulators can run here, with a reason when not."""
     out = {}
@@ -383,6 +406,10 @@ def availability():
         import pygimli  # noqa: F401
         out["ERT"] = (True, "PyGIMLi found") if shutil.which("tetgen") else \
             (False, "TetGen not found: conda install -c conda-forge tetgen")
+        mem = memory_gb()
+        if out["ERT"][0] and mem is not None and mem < ERT_MIN_GB:
+            out["ERT"] = (False, f"needs about {ERT_MIN_GB:g} GB of RAM, this server has {mem:.1f} GB: "
+                                 "run the app locally for ERT")
     except Exception as e:  # noqa: BLE001
         out["ERT"] = (False, f"PyGIMLi not available ({e})")
     try:

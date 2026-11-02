@@ -79,7 +79,7 @@ conda activate pyborehole
 pip install -e ".[all]"
 ```
 
-[`requirements.txt`](../requirements.txt) lists the same dependencies for those who prefer `pip install -r requirements.txt` in a checkout (it leaves PyGIMLi out on purpose; install it as above).
+[`requirements.txt`](../requirements.txt) lists the same dependencies, PyGIMLi and Streamlit included, for `pip install -r requirements.txt` in a checkout; it is also what Streamlit Community Cloud installs. Do not use it in an environment with PyGIMLi from the conda `gimli` channel: pip would upgrade NumPy under it (use the extras as above instead).
 
 ### A3. Check
 

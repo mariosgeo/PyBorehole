@@ -1,25 +1,16 @@
-# PyBorehole Python dependencies.  Full, tested instructions: docs/INSTALL.md
+# Python dependencies of the PyBorehole app and simulators, for pip.
 #
-# PyGIMLi (ERT) and the TetGen mesh generator are NOT in this file: they are
-# installed first, in a way that depends on the operating system.
-#
-#   Windows:
-#     conda create -n pyborehole -c gimli -c conda-forge python=3.11 pygimli tetgen
-#     conda activate pyborehole
+# This is the file Streamlit Community Cloud installs (together with
+# packages.txt for TetGen). It also works for a local pip-only environment:
 #     pip install -r requirements.txt
 #
-#   Linux:
-#     conda create -n pyborehole -c conda-forge python=3.11 tetgen
-#     conda activate pyborehole
-#     pip install pygimli -r requirements.txt
+# Windows with PyGIMLi from the conda "gimli" channel: do NOT use this file;
+# pip would upgrade NumPy under the conda PyGIMLi and break it. Install the
+# package without the ert extra instead: pip install "pyborehole[em,app,test]"
+# (see docs/INSTALL.md).
 #
-# Do not add pygimli here: the conda build of PyGIMLi on Windows runs on
-# NumPy 1.26, but its package metadata asks for NumPy >= 2.1, so pip would
-# upgrade NumPy and break the compiled PyGIMLi core.
-#
-# The gamma-ray simulator needs no extra Python package, but a compiled Geant4
-# program (gamma/); the optional OpenMC check needs OpenMC.  Neither is
-# pip-installable here: see docs/INSTALL.md.
+# The gamma-ray simulator needs a compiled Geant4 program and the optional
+# OpenMC check needs OpenMC; neither can be installed with pip (docs/INSTALL.md).
 
 # core
 numpy>=1.24
@@ -27,12 +18,12 @@ scipy>=1.10
 pandas>=2.0
 matplotlib>=3.7
 
-# ERT visualisation and meshes (with pygimli, installed separately)
-pyvista>=0.43
+# ERT (DC resistivity, 3D finite elements); TetGen comes from packages.txt
+pygimli>=1.5
 
 # EM (frequency-domain induction)
 simpeg>=0.22
 discretize>=0.10
 
-# tests
-pytest>=7.0
+# app
+streamlit>=1.50

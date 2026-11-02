@@ -49,6 +49,31 @@ The [Streamlit](https://streamlit.io) app opens in the browser with four tabs:
 
 Run times on a 24-core PC for the 3-unit example: EM about 35 s, gamma ray 10 s to a few minutes depending on the statistics, ERT about 5 minutes (two 3D solves, several GB of RAM).
 
+### Publish the app on Streamlit Community Cloud
+
+The repository is set up for [Streamlit Community Cloud](https://share.streamlit.io):
+
+| File | Role |
+|---|---|
+| [`streamlit_app.py`](https://github.com/mariosgeo/PyBorehole/blob/main/streamlit_app.py) | entry point |
+| [`requirements.txt`](https://github.com/mariosgeo/PyBorehole/blob/main/requirements.txt) | Python packages, installed with pip (PyGIMLi, SimPEG, Streamlit, ...) |
+| [`packages.txt`](https://github.com/mariosgeo/PyBorehole/blob/main/packages.txt) | Debian packages: `tetgen` for the ERT mesh |
+| [`.streamlit/config.toml`](https://github.com/mariosgeo/PyBorehole/blob/main/.streamlit/config.toml) | hides the developer menu from visitors |
+
+To publish:
+
+1. Sign in at <https://share.streamlit.io> with the GitHub account that owns the repository.
+2. **Create app** → **Deploy a public app from GitHub**: repository `mariosgeo/PyBorehole`, branch `main`, main file path `streamlit_app.py`.
+3. Under **Advanced settings** choose **Python 3.12**, then **Deploy**. The first build takes a few minutes; later pushes to `main` redeploy automatically.
+
+What runs on the free server (one shared CPU, about 2.7 GB of RAM):
+
+- **EM**: yes, well under a minute for the 3-unit example (19 s on a single CPU thread in a test).
+- **ERT**: greyed out. The 3D solve needs several GB of RAM and would crash the app for every visitor; the app shows the reason. To allow it on a larger server, set the environment variable `PYBOREHOLE_ERT_MIN_GB` (default 6) to that server's memory or less.
+- **Gamma ray**: greyed out. Geant4 is a C++ toolkit that cannot be installed there; run the app locally for the gamma ray.
+
+All three methods run when the app is started locally (`pyborehole-app` or `streamlit run streamlit_app.py`) on a machine with the full installation.
+
 ---
 
 ## Start here: `run_combined.py`
@@ -330,6 +355,8 @@ The gamma-ray tests (`tests/test_gamma.py`, about 30 s) are skipped when Geant4 
 run_combined.py               main script: ERT + EM + gamma-ray backfill study  <- start here
 run_realistic.py              the same study with realistic tools (tool body, normal/lateral, focused EM)
 streamlit_app.py              interactive app (entry point; the app is geometry_class/app.py)
+requirements.txt, packages.txt   pip and Debian dependencies (also used by Streamlit Community Cloud)
+.streamlit/config.toml        Streamlit settings
 geometry_class/
     geometry.py               ERT: 3D mesh, electrodes, PyGIMLi forward model
     em_geometry.py            EM: cylindrical / octree mesh, SimPEG forward model

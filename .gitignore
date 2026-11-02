@@ -16,3 +16,12 @@ geometry_class/gamma/build/
 dist/
 build/
 *.egg-info/
+
+# Local scratch files and run outputs (kept on disk, not published)
+/_*.py
+/_*.txt
+/backup.txt
+/output_data.dat
+/plc.vtk
+/mesh*.bms
+/docs/*_preview.pdf

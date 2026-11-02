@@ -9,7 +9,6 @@ import matplotlib.cm as cm
 import pygimli as pg
 import pygimli.physics.ert as ert
 import warnings
-import pyvista as pv
 import os
 import shutil
 import sys
@@ -686,6 +685,7 @@ class Geometry:
             faces.append([bound.nodeCount()] + b_node_ids)
             markers.append(marker)
 
+        import pyvista as pv  # only this 3D view needs PyVista (and OpenGL)
         surf = pv.PolyData(np.array(points), np.hstack(faces))
         surf.cell_data["Boundary Markers"] = np.array(markers)
 

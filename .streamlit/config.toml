@@ -1,0 +1,8 @@
+# Streamlit settings (local runs and Streamlit Community Cloud)
+
+[client]
+# Visitors of the published app do not see the developer menu
+toolbarMode = "viewer"
+
+[browser]
+gatherUsageStats = false

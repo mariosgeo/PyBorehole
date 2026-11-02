@@ -225,6 +225,27 @@ def _medium(m: Union[GammaMedium, dict]) -> GammaMedium:
 # ---------------------------------------------------------------------------
 # Running the Geant4 program
 # ---------------------------------------------------------------------------
+def available_cpus() -> int:
+    """CPU cores this process may use: $PYBOREHOLE_THREADS if set, else the
+    container CPU quota (cgroup) and the CPU affinity, else os.cpu_count().
+    Inside a container os.cpu_count() reports the host's cores, which would
+    start far too many Geant4 processes."""
+    if os.environ.get("PYBOREHOLE_THREADS"):
+        return max(1, int(os.environ["PYBOREHOLE_THREADS"]))
+    n = os.cpu_count() or 1
+    try:
+        n = min(n, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        pass
+    try:                                                    # cgroup v2: "<quota> <period>" or "max <period>"
+        quota, period = open("/sys/fs/cgroup/cpu.max").read().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, round(int(quota) / int(period))))
+    except (OSError, ValueError):
+        pass
+    return max(1, n)
+
+
 def _build_dirs() -> List[str]:
     """Where the program is built: next to its sources if that folder is
     writable (a git checkout or a user environment), else a per-user folder."""
@@ -377,7 +398,7 @@ class GammaGeometry:
         self.layers = [(float(t), float(b), _medium(m)) for t, b, m in self.layers]
         self.set_backfill(self.backfill, self.zones)
         if self.n_jobs is None:
-            self.n_jobs = os.cpu_count() or 1
+            self.n_jobs = available_cpus()
         self._calibration: Optional[Dict[str, float]] = None
 
     def set_backfill(self, backfill=None, zones=None) -> None:

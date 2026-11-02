@@ -74,6 +74,31 @@ What runs on the free server (one shared CPU, about 2.7 GB of RAM):
 
 All three methods run when the app is started locally (`pyborehole-app` or `streamlit run streamlit_app.py`) on a machine with the full installation.
 
+### Host the app with all three simulators (Docker, Hugging Face Spaces)
+
+The [`Dockerfile`](https://github.com/mariosgeo/PyBorehole/blob/main/Dockerfile) builds one image with PyGIMLi and TetGen, SimPEG, Geant4 11.4 (from conda-forge) and the compiled gamma-ray program, and starts the app on port 8501. The steps are in [`deploy/container_setup.sh`](https://github.com/mariosgeo/PyBorehole/blob/main/deploy/container_setup.sh).
+
+```bash
+docker build -t pyborehole .
+docker run -p 8501:8501 pyborehole          # then open http://localhost:8501
+```
+
+The image runs on any container host (a VPS, Google Cloud Run, Azure Container Apps, Render, Fly.io, ...). Tested locally (`linux/amd64`): EM and the gamma ray run in the container. ERT needs a lot of memory: the 3-unit example was killed at 7.6 GB in an 8 GB container and peaked at a 23 GB footprint on macOS, so give the container 16 GB or more; the exact Linux peak is still to be measured.
+
+**Hugging Face Spaces** (the free CPU tier has 2 vCPUs and 16 GB of RAM; EM and the gamma ray run there, ERT may need the paid 32 GB CPU tier, see above). The Space runs one ERT simulation at a time (`PYBOREHOLE_MAX_ERT=1`):
+
+1. At <https://huggingface.co/new-space> choose a name, the **Docker** SDK with the **Blank** template, and the free **CPU basic** hardware.
+2. Upload the two files in [`deploy/huggingface/`](https://github.com/mariosgeo/PyBorehole/tree/main/deploy/huggingface) to the Space: `Dockerfile` and `README.md` (the Space settings are in its header).
+3. The Space builds the image from the current GitHub `main` branch (about 15–20 minutes the first time) and starts. After a push to GitHub, use **Settings → Factory rebuild** in the Space to take the new code.
+
+Server settings (environment variables, in a Space under **Settings → Variables**):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PYBOREHOLE_ERT_MIN_GB` | 6 | memory one ERT run needs; ERT is disabled on a server with less |
+| `PYBOREHOLE_MAX_ERT` | memory / `PYBOREHOLE_ERT_MIN_GB` | ERT runs at the same time; further visitors wait in a queue |
+| `PYBOREHOLE_THREADS` | the container's CPU limit | processes for the gamma-ray Monte Carlo |
+
 ---
 
 ## Start here: `run_combined.py`
@@ -356,6 +381,7 @@ run_combined.py               main script: ERT + EM + gamma-ray backfill study  
 run_realistic.py              the same study with realistic tools (tool body, normal/lateral, focused EM)
 streamlit_app.py              interactive app (entry point; the app is geometry_class/app.py)
 requirements.txt, packages.txt   pip and Debian dependencies (also used by Streamlit Community Cloud)
+Dockerfile, deploy/           container image with all three simulators; Hugging Face Space files
 .streamlit/config.toml        Streamlit settings
 geometry_class/
     geometry.py               ERT: 3D mesh, electrodes, PyGIMLi forward model

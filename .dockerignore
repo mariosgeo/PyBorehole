@@ -1,0 +1,14 @@
+# Only what the app needs goes into the image (an allow-list, so no stray or
+# private files in the project folder end up in it)
+*
+!geometry_class/
+!deploy/
+!.streamlit/
+!streamlit_app.py
+!requirements.txt
+!pyproject.toml
+!README.md
+!LICENSE
+geometry_class/gamma/build/
+**/__pycache__/
+**/*.pyc

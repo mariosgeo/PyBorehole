@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -403,6 +404,18 @@ def memory_gb():
 ERT_MIN_GB = float(os.environ.get("PYBOREHOLE_ERT_MIN_GB", "6"))
 
 
+@st.cache_resource
+def ert_slots():
+    """How many ERT runs may go at once on this server, shared by all visitors:
+    $PYBOREHOLE_MAX_ERT, else as many as fit in memory (ERT_MIN_GB each), at least one."""
+    if os.environ.get("PYBOREHOLE_MAX_ERT"):
+        n = max(1, int(os.environ["PYBOREHOLE_MAX_ERT"]))
+    else:
+        mem = memory_gb()
+        n = max(1, int(mem // ERT_MIN_GB)) if mem else 1
+    return threading.BoundedSemaphore(n), n
+
+
 def availability():
     """Which simulators can run here, with a reason when not."""
     out = {}
@@ -427,7 +440,8 @@ def availability():
     try:
         from geometry_class.gamma_geometry import _build_dirs, _EXE_NAME, geant4_env
         geant4_env()
-        built = any(os.path.isfile(os.path.join(d, _EXE_NAME)) for d in _build_dirs())
+        built = os.path.isfile(os.environ.get("GAMMALOG_EXE", "")) or \
+            any(os.path.isfile(os.path.join(d, _EXE_NAME)) for d in _build_dirs())
         out["Gamma"] = (True, "Geant4 program and data found") if built else \
             (False, "Geant4 data found, but the program is not compiled: run pyborehole-build-gamma")
     except Exception as e:  # noqa: BLE001
@@ -561,8 +575,16 @@ with tab4:
                                        dict(material=backfill_material(), K=ss.bf_K, U=ss.bf_U, Th=ss.bf_Th),
                                        gr_step, gr_events, gr_cd, gr_cl, gr_td, progress=st.write))
                 if run_ert:
-                    parts.append(do_ert(tbl, ss.L, ss.D, ss.bf_res, arr.lower(), ert_sp, ert_step, ert_mn,
-                                        ert_tool_d, progress=st.write))
+                    slots, n_slots = ert_slots()
+                    if not slots.acquire(blocking=False):
+                        st.write(f"Waiting for a free ERT slot: this server runs {n_slots} ERT "
+                                 f"simulation{'s' if n_slots > 1 else ''} at a time ...")
+                        slots.acquire()
+                    try:
+                        parts.append(do_ert(tbl, ss.L, ss.D, ss.bf_res, arr.lower(), ert_sp, ert_step, ert_mn,
+                                            ert_tool_d, progress=st.write))
+                    finally:
+                        slots.release()
                 status.update(label="Done", state="complete", expanded=False)
                 ss.results, ss.results_key = pd.concat(parts, ignore_index=True), key
                 ss.results_tbl = tbl

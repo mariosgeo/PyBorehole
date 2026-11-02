@@ -87,6 +87,16 @@ def test_database_is_consistent():
             assert backfill_resistivity(name, w["rho_w"]) > 0
 
 
+def test_variants_follow_their_clay_mineralogy():
+    """Within a family the CEC orders the resistivity: smectite < illite < kaolinite, clean < clayey sand."""
+    r = {n: unit_properties(n, "Fresh")["resistivity"] for n in LITHOLOGIES}
+    assert r["Clay, smectitic (bentonitic)"] < r["Clay, illitic"] < r["Clay"] < r["Clay, kaolinitic"]
+    assert r["Sand, clayey"] < r["Silty sand"] < r["Sand"]
+    assert r["Shale"] < r["Sandstone, shaly"] < r["Sandstone"]
+    api = {n: gamma_api(l["K"], l["U"], l["Th"]) for n, l in LITHOLOGIES.items()}
+    assert api["Shale, black (organic-rich)"] > api["Shale"] > api["Limestone"]
+
+
 def test_salt_water_lowers_resistivity_hundredfold_for_clean_sand():
     fresh = unit_properties("Sand", "Fresh")["resistivity"]
     salt = unit_properties("Sand", "Salt")["resistivity"]

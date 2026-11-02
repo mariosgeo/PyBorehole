@@ -130,6 +130,9 @@ MINERALS = {
     "calcite": ({"Ca": 0.4004, "C": 0.1200, "O": 0.4796}, 2.71),
     "cement":  ({"Ca": 0.44, "O": 0.39, "Si": 0.10, "Al": 0.03, "Fe": 0.02,
                  "S": 0.01, "H": 0.01}, 2.90),
+    "dolomite": ({"Ca": 0.2173, "Mg": 0.1318, "C": 0.1303, "O": 0.5206}, 2.84),   # CaMg(CO3)2
+    "feldspar": ({"K": 0.1405, "Al": 0.0969, "Si": 0.3027, "O": 0.4599}, 2.56),   # KAlSi3O8
+    "organic":  ({"C": 0.45, "O": 0.49, "H": 0.06}, 1.40),                         # peat solids
 }
 _WATER = {"H": 0.1119, "O": 0.8881}
 
@@ -143,6 +146,13 @@ MATERIALS = {
     "sand_pack": ({"quartz": 1.00}, 0.35),   # filter sand
     "bentonite": ({"clay": 1.00}, 0.75),     # bentonite grout, ~1.4 g/cm3
     "cement":    ({"cement": 1.00}, 0.55),   # cement grout, ~1.85 g/cm3
+    "silt":      ({"quartz": 0.75, "clay": 0.25}, 0.40),
+    "shale":     ({"clay": 0.80, "quartz": 0.20}, 0.12),
+    "marl":      ({"calcite": 0.50, "clay": 0.50}, 0.25),
+    "chalk":     ({"calcite": 1.00}, 0.35),
+    "dolomite":  ({"dolomite": 1.00}, 0.10),
+    "arkose":    ({"quartz": 0.70, "feldspar": 0.25, "clay": 0.05}, 0.25),
+    "peat":      ({"organic": 0.85, "quartz": 0.15}, 0.85),
 }
 
 _SALTS = {"NaCl": {"Na": 0.3934, "Cl": 0.6066}, "KCl": {"K": 0.5244, "Cl": 0.4756}}

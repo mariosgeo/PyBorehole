@@ -8,8 +8,8 @@ Tabs:
   1. Geometry   - borehole and the depth intervals of the units (IDs U1, U2, ...)
   2. Properties - per unit: lithology and pore water from the built-in database,
                   Waxman-Smits parameters -> bulk resistivity, K/U/Th, density; the borehole fill
-  3. Tools      - ERT array, EM coils and frequencies, gamma-ray probe
-  4. Run        - choose ERT / EM / gamma ray, run, plot the logs and the borehole effect
+  3. Tools      - ERT array, EM coils and frequencies, gamma-ray probe, NMR probe
+  4. Run        - choose ERT / EM / gamma ray / NMR, run, plot the logs and the borehole effect
 """
 import io
 import json
@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from geometry_class.petrophysics import (BACKFILLS, LITHOLOGIES, WATERS, qv_from_cec, waxman_smits_b,
+from geometry_class.petrophysics import (BACKFILL_NMR, BACKFILLS, LITHOLOGIES, WATERS, qv_from_cec, waxman_smits_b,
                                          waxman_smits_resistivity,
                                          backfill_resistivity, bulk_density, gamma_api)
 
@@ -45,6 +45,7 @@ LITH_COLORS = {"Gravel": "#e8c170", "Sand": "#f2d38f", "Silty sand": "#d9c48f", 
                "Clay": "#8fa9c9", "Glacial till": "#a39e8f", "Sandstone": "#e0a96d", "Limestone": "#c9d6df"}
 EXAMPLE_UNITS = pd.DataFrame({"top": [0.0, 5.0, 10.0], "bottom": [5.0, 10.0, 15.0]})
 EXAMPLE_LITH = ["Silty sand", "Clay", "Gravel"]
+NMR_KEYS = ("t2lm", "t2_sigma", "cbw")
 
 
 # ===========================================================================
@@ -93,7 +94,7 @@ def load_unit_defaults(uid, lith=None, water=None):
     L = LITHOLOGIES[lith]
     ss[f"{uid}_lith"], ss[f"{uid}_water"] = lith, water
     ss[f"{uid}_rhow"] = WATERS[water]["rho_w"]
-    for k in ("porosity", "a", "m", "n", "cec", "grain_density", "K", "U", "Th"):
+    for k in ("porosity", "a", "m", "n", "cec", "grain_density", "K", "U", "Th") + NMR_KEYS:
         ss[f"{uid}_{k}"] = float(L[k])
     ss.setdefault(f"{uid}_sw", 1.0)
     ss.setdefault(f"{uid}_override", False)
@@ -104,6 +105,8 @@ def ensure_unit(uid, index):
     if f"{uid}_lith" not in ss:
         lith = EXAMPLE_LITH[index] if index < len(EXAMPLE_LITH) else "Sand"
         load_unit_defaults(uid, lith, "Fresh")
+    for k in NMR_KEYS:                       # units set up before the NMR tool existed
+        ss.setdefault(f"{uid}_{k}", float(LITHOLOGIES[ss[f"{uid}_lith"]][k]))
 
 
 def on_lith_change(uid):
@@ -118,6 +121,8 @@ def ensure_backfill():
     if "bf_type" not in ss:
         ss["bf_type"], ss["bf_water"] = "Water", "Fresh"
         on_backfill_change()
+    for k, v in BACKFILLS[ss["bf_type"]]["nmr"].items():
+        ss.setdefault(f"bf_nmr_{k}", float(v))
 
 
 def on_backfill_change():
@@ -127,6 +132,12 @@ def on_backfill_change():
         ss[f"bf_{k}"] = float(bf[k])
     if ss["bf_type"] == "Water" and ss["bf_water"] == "Salt":
         ss["bf_K"] = 0.04
+    for k, v in bf["nmr"].items():
+        ss[f"bf_nmr_{k}"] = float(v)
+
+
+def backfill_nmr():
+    return {k: ss[f"bf_nmr_{k}"] for k in ("water", "t2lm", "t2_sigma", "cbw")}
 
 
 def backfill_material():
@@ -150,7 +161,9 @@ def unit_table(units: pd.DataFrame) -> pd.DataFrame:
                          density=bulk_density(g("porosity"), g("grain_density"), g("sw"),
                                               WATERS[g("water")]["density"]),
                          K=g("K"), U=g("U"), Th=g("Th"), api=gamma_api(g("K"), g("U"), g("Th")),
-                         gamma_material=LITHOLOGIES[g("lith")]["gamma_material"]))
+                         gamma_material=LITHOLOGIES[g("lith")]["gamma_material"],
+                         water_content=g("porosity") * g("sw"), t2lm=g("t2lm"), t2_sigma=g("t2_sigma"),
+                         cbw=g("cbw")))
     return pd.DataFrame(rows)
 
 
@@ -197,7 +210,7 @@ for _k in list(ss.keys()):
     if _k.startswith(("U", "bf_")):
         ss[_k] = ss[_k]
 st.title("PyBorehole")
-st.caption("Borehole backfill effect on resistivity (ERT), induction (EM) and natural gamma-ray logs")
+st.caption("Borehole backfill effect on resistivity (ERT), induction (EM), natural gamma-ray and NMR logs")
 tab1, tab2, tab3, tab4 = st.tabs(["1 · Geometry", "2 · Properties", "3 · Tools", "4 · Run"])
 
 # ===========================================================================
@@ -282,6 +295,15 @@ with tab2:
                     st.number_input("Th (ppm)", min_value=0.0, max_value=1000.0, step=0.5, key=f"{uid}_Th")
                     st.number_input("Grain density (g/cm³)", min_value=1.0, max_value=5.0, step=0.01,
                                     key=f"{uid}_grain_density")
+                    st.markdown("**NMR**")
+                    st.number_input("T2 log-mean (ms)", min_value=0.5, max_value=3000.0, step=10.0,
+                                    format="%.1f", key=f"{uid}_t2lm",
+                                    help="Main T2 mode; follows pore size: gravel ~500, sand ~300, silt ~25, "
+                                         "clay a few ms")
+                    st.number_input("T2 spread (decades)", min_value=0.05, max_value=1.5, step=0.05,
+                                    key=f"{uid}_t2_sigma")
+                    st.number_input("Clay-bound water fraction (-)", min_value=0.0, max_value=1.0, step=0.05,
+                                    key=f"{uid}_cbw", help="Share of the pore water bound to clay (T2 ≈ 2 ms)")
                 with c4:
                     t = unit_table(units.iloc[[i]]).iloc[0]
                     st.markdown("**Result**")
@@ -292,6 +314,7 @@ with tab2:
                         st.number_input("Resistivity used (Ω·m)", min_value=0.01, key=f"{uid}_rho_manual")
                     st.metric("Bulk density", f"{t.density:.2f} g/cm³")
                     st.metric("Gamma ray (16K+8U+4Th)", f"{t.api:.0f} API")
+                    st.metric("Water content (NMR)", f"{t.water_content:.3f}")
 
         st.subheader("Borehole fill")
         ensure_backfill()
@@ -310,28 +333,42 @@ with tab2:
             k2.number_input("Fill U (ppm)", min_value=0.0, step=0.1, key="bf_U")
             k3.number_input("Fill Th (ppm)", min_value=0.0, step=0.5, key="bf_Th")
             st.caption(f"Fill gamma ray: {gamma_api(ss.bf_K, ss.bf_U, ss.bf_Th):.0f} API")
+            n1, n2, n3, n4 = st.columns(4)
+            n1.number_input("Fill water content (-)", min_value=0.0, max_value=1.0, step=0.05, key="bf_nmr_water")
+            n2.number_input("Fill T2 log-mean (ms)", min_value=0.5, max_value=3000.0, step=10.0, format="%.1f",
+                            key="bf_nmr_t2lm")
+            n3.number_input("Fill T2 spread (decades)", min_value=0.05, max_value=1.5, step=0.05,
+                            key="bf_nmr_t2_sigma")
+            n4.number_input("Fill clay-bound fraction (-)", min_value=0.0, max_value=1.0, step=0.05,
+                            key="bf_nmr_cbw")
+            st.caption("NMR of the fill: open water relaxes slowly (T2 ≈ 2.5 s); the water in bentonite and "
+                       "cement grout is bound (T2 ≈ 1–2 ms) and partly invisible to a slim probe.")
 
         st.subheader("Summary")
         tbl = unit_table(units)
         st.dataframe(tbl[["id", "top", "bottom", "lithology", "water", "rho_w", "porosity", "m", "cec", "qv",
-                          "resistivity", "density", "K", "U", "Th", "api"]].round(3),
+                          "resistivity", "density", "K", "U", "Th", "api", "water_content", "t2lm", "cbw"]].round(3),
                      width="stretch", hide_index=True,
                      column_config={"rho_w": "ρw (Ω·m)", "cec": "CEC (meq/100 g)", "qv": "Qv (meq/cm³)",
                                     "resistivity": "ρ bulk (Ω·m)",
-                                    "density": "ρ bulk (g/cm³)", "api": "GR (API)"})
+                                    "density": "ρ bulk (g/cm³)", "api": "GR (API)",
+                                    "water_content": "water content (-)", "t2lm": "T2LM (ms)",
+                                    "cbw": "clay-bound (-)"})
         with st.expander("Built-in database"):
             st.markdown("**Lithologies** (typical values; replace them with local data when available)")
             st.dataframe(pd.DataFrame(LITHOLOGIES).T, width="stretch")
             st.markdown("**Pore waters**")
             st.dataframe(pd.DataFrame(WATERS).T, width="stretch")
             st.markdown("**Borehole fills**")
-            st.dataframe(pd.DataFrame(BACKFILLS).T.drop(columns="ws"), width="stretch")
+            st.dataframe(pd.DataFrame(BACKFILLS).T.drop(columns=["ws", "nmr"]), width="stretch")
+            st.markdown("**Borehole fills, NMR**")
+            st.dataframe(pd.DataFrame(BACKFILL_NMR).T, width="stretch")
 
 # ===========================================================================
 # Tab 3: tools
 # ===========================================================================
 with tab3:
-    t1, t2, t3 = st.columns(3)
+    t1, t2, t3, t4 = st.columns(4)
     with t1:
         st.subheader("ERT (DC resistivity)")
         arr = st.radio("Array", ["Wenner", "Normal", "Lateral"], key="ert_array", horizontal=True,
@@ -376,6 +413,42 @@ with tab3:
                                 format="%.3f", key="gr_td")
         if units_ok and gr_td >= ss.D:
             st.error("The probe must be narrower than the borehole.")
+    with t4:
+        st.subheader("NMR (slim water-well probe)")
+        nmr_f = parse_list(st.text_input("Frequencies (kHz), one shell each", "450, 310", key="nmr_f"),
+                           "NMR frequencies")
+        nmr_td = st.number_input("Probe diameter (m)", min_value=0.02, max_value=0.2, value=0.060, step=0.001,
+                                 format="%.3f", key="nmr_td")
+        nmr_md = st.number_input("Magnet diameter (m)", min_value=0.005, max_value=0.15, value=0.025, step=0.001,
+                                 format="%.3f", key="nmr_md")
+        nmr_br = st.number_input("Magnet remanence (T)", min_value=0.1, max_value=1.5, value=1.2, step=0.05,
+                                 key="nmr_br", help="NdFeB about 1.2 T, SmCo about 1.0 T")
+        nmr_ap = st.number_input("Sensitive length (m)", min_value=0.1, max_value=2.0, value=0.5, step=0.05,
+                                 key="nmr_ap", help="Vertical extent of the sensitive region (antenna length)")
+        nmr_te = st.number_input("Echo spacing TE (ms)", min_value=0.2, max_value=10.0, value=1.5, step=0.1,
+                                 key="nmr_te")
+        nmr_ne = st.number_input("Number of echoes", min_value=50, max_value=5000, value=1000, step=50,
+                                 key="nmr_ne")
+        nmr_noise = st.number_input("Noise per echo (% water content)", min_value=0.0, max_value=20.0, value=2.0,
+                                    step=0.5, key="nmr_noise", help="After stacking; 0 = noise-free")
+        nmr_step = st.number_input("Measuring step (m)", min_value=0.05, max_value=1.0, value=0.1, step=0.05,
+                                   key="nmr_step")
+        nmr_ok = bool(nmr_f)
+        if nmr_f:
+            from geometry_class.nmr_geometry import GAMMA_H
+            c = nmr_br * (nmr_md / 2) ** 2 / 2
+            sh = pd.DataFrame({"f (kHz)": nmr_f})
+            b0 = 2 * np.pi * sh["f (kHz)"] * 1e3 / GAMMA_H
+            sh["shell ⌀ (cm)"] = 200 * np.sqrt(c / b0)
+            sh["gradient (T/m)"] = 2 * b0 / (sh["shell ⌀ (cm)"] / 200)
+            st.dataframe(sh.round(2), hide_index=True, width="stretch")
+            if (sh["shell ⌀ (cm)"] / 100 <= nmr_td).any():
+                st.error("A shell lies inside the probe: lower that frequency or use a stronger magnet.")
+                nmr_ok = False
+            inside = sh[sh["shell ⌀ (cm)"] / 100 < ss.D]
+            if len(inside):
+                st.warning(f"The {', '.join(f'{v:.1f}' for v in inside['shell ⌀ (cm)'])} cm shell lies inside "
+                           f"the {ss.D * 100:.0f} cm borehole: it measures the fill, not the formation.")
 
 # ===========================================================================
 # Tab 4: run
@@ -463,15 +536,17 @@ def tool_styles(tools):
 def plot_logs(results, tbl, L, D):
     have_res = results["tool"].str.startswith(("ERT", "EM")).any()
     have_gr = (results["tool"] == "Gamma ray").any()
-    ncols = 1 + have_res + have_gr
+    have_nmr = results["tool"].str.startswith("NMR").any()
+    ncols = 1 + have_res + have_gr + have_nmr
     fig, axes = plt.subplots(1, ncols, figsize=(3.2 + 4.5 * (ncols - 1), 8.5), sharey=True,
                              gridspec_kw={"width_ratios": [1] + [2.2] * (ncols - 1)})
     axes = np.atleast_1d(axes)
     model_sketch(tbl, L, D, ax=axes[0], label="full")
     zmax = max(tbl["bottom"].max(), L) * 1.05
     k = 1
-    tools = [t for t in dict.fromkeys(results["tool"]) if t != "Gamma ray"]
-    style = tool_styles(tools)
+    all_tools = list(dict.fromkeys(results["tool"]))
+    tools = [t for t in all_tools if t.startswith(("ERT", "EM"))]
+    style = tool_styles([t for t in all_tools if t != "Gamma ray"])
     step = lambda col: (np.repeat(tbl[col].values, 2),
                         -np.ravel([[t, b if i < len(tbl) - 1 else zmax]
                                    for i, (t, b) in enumerate(zip(tbl["top"], tbl["bottom"]))]))
@@ -488,6 +563,18 @@ def plot_logs(results, tbl, L, D):
         ax.set_title("Resistivity logs (dotted: no borehole)", fontsize=10)
         ax.legend(fontsize=7.5, loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=2)
         ax.grid(True, which="both", ls="--", alpha=0.4)
+    if have_nmr:
+        ax = axes[k]; k += 1
+        for t in [t for t in all_tools if t.startswith("NMR")]:
+            col, _ = style[t]
+            for case, ls, lw in (("borehole", "-", 1.6), ("no borehole", ":", 1.2)):
+                d = results[(results.tool == t) & (results.case == case)].sort_values("depth")
+                ax.plot(d.value, -d.depth, ls=ls, lw=lw, color=col, label=t if case == "borehole" else None)
+        ax.plot(*step("water_content"), "k--", lw=2, label="true water content")
+        ax.set_xlim(0, max(1.05, ax.get_xlim()[1])); ax.set_xlabel("NMR water content (-)")
+        ax.set_title("NMR log (dotted: no borehole)", fontsize=10)
+        ax.legend(fontsize=7.5, loc="upper center", bbox_to_anchor=(0.5, -0.09), ncol=1)
+        ax.grid(True, ls="--", alpha=0.4)
     if have_gr:
         ax = axes[k]
         for case, ls, col in (("borehole", "-", "#2ca02c"), ("no borehole", ":", "#2ca02c")):
@@ -505,6 +592,54 @@ def plot_logs(results, tbl, L, D):
             ax.axhline(-b, color="gray", ls=":", lw=0.8)
     fig.tight_layout()
     return fig
+
+
+def plot_t2(spectra, tbl):
+    """T2 distribution against depth, per shell (columns) with and without the borehole (rows)."""
+    shells = sorted({d for _, d in spectra})
+    fig, axes = plt.subplots(2, len(shells), figsize=(4.6 * len(shells), 9), sharey=True, squeeze=False)
+    # colour scale from the formation alone (no-borehole panels): open borehole water,
+    # one strong T2 peak, would otherwise hide the formation; it saturates instead
+    vmax = max((v[2].max() for (case, _), v in spectra.items() if case == "no borehole"), default=0.0) \
+        or max(v[2].max() for v in spectra.values()) or 1.0
+    for j, d in enumerate(shells):
+        for i, case in enumerate(("borehole", "no borehole")):
+            ax = axes[i, j]
+            g, z, f = spectra[(case, d)]
+            edges = np.sqrt(g[1:] * g[:-1])
+            edges = np.concatenate([[g[0] ** 2 / edges[0]], edges, [g[-1] ** 2 / edges[-1]]])
+            zs = np.concatenate([[z[0] - (z[1] - z[0]) / 2], (z[1:] + z[:-1]) / 2, [z[-1] + (z[-1] - z[-2]) / 2]]) \
+                if len(z) > 1 else np.array([z[0] - 0.05, z[0] + 0.05])
+            pc = ax.pcolormesh(edges * 1e3, -zs, f, cmap="viridis", vmin=0, vmax=vmax, shading="flat")
+            for cut in (3, 33):
+                ax.axvline(cut, color="w", ls="--", lw=0.8)
+            for b in tbl["bottom"].values[:-1]:
+                ax.axhline(-b, color="w", ls=":", lw=0.8)
+            ax.set_xscale("log")
+            ax.set_title(f"shell {d * 100:.0f} cm, {case}", fontsize=10)
+            if i == 1:
+                ax.set_xlabel("T2 (ms)")
+            if j == 0:
+                ax.set_ylabel("Depth (m)")
+    axes[0, 0].yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{-v + 0.0:g}"))
+    fig.colorbar(pc, ax=axes, shrink=0.6, extend="max", label="water content per T2 bin (-)")
+    fig.suptitle("T2 distributions (dashed: 3 ms clay-bound and 33 ms mobile-water cut-offs)", fontsize=11)
+    return fig
+
+
+def nmr_table(results, tbl, L):
+    """NMR quantities at the middle of each unit (nearest station), per shell and case."""
+    rows = []
+    nmr = results[results["tool"].str.startswith("NMR")]
+    for u in tbl.itertuples():
+        zmid = 0.5 * (u.top + min(u.bottom, L))
+        for (t, case), d in nmr.groupby(["tool", "case"], sort=False):
+            r = d.loc[(d.depth - zmid).abs().idxmin()]
+            rows.append({"unit": f"{u.id} ({zmid:g} m)", "shell": t.replace("NMR water ", ""), "case": case,
+                         "water": r.water, "true water": u.water_content, "mobile": r.mobile,
+                         "bound": r.clay_bound + r.capillary, "T2LM (ms)": r.t2lm_ms,
+                         "K SDR (m/day)": r.K_sdr_m_day})
+    return pd.DataFrame(rows)
 
 
 def plot_effect(results):
@@ -539,7 +674,7 @@ with tab4:
     avail = availability()
 
     st.subheader("What to simulate")
-    r1, r2, r3 = st.columns(3)
+    r1, r2, r3, r4 = st.columns(4)
     run_ert = r1.checkbox("ERT", value=False, disabled=not avail["ERT"][0], key="run_ert")
     r1.caption(("✅ " if avail["ERT"][0] else "⚠️ ") + avail["ERT"][1])
     r1.caption("3D finite elements: a few minutes and several GB of RAM.")
@@ -549,6 +684,9 @@ with tab4:
     run_gr = r3.checkbox("Gamma ray", value=avail["Gamma"][0], disabled=not avail["Gamma"][0], key="run_gr")
     r3.caption(("✅ " if avail["Gamma"][0] else "⚠️ ") + avail["Gamma"][1])
     r3.caption("Monte Carlo (Geant4) on all CPU cores: ~10 s to a few minutes.")
+    run_nmr = r4.checkbox("NMR", value=True, key="run_nmr")
+    r4.caption("✅ NumPy / SciPy")
+    r4.caption("Slim water-well probe: a few seconds.")
     if not avail["Gamma"][0] and "not compiled" in avail["Gamma"][1]:
         if r3.button("Compile the gamma-ray program now"):
             from geometry_class.gamma_geometry import build_gammalog
@@ -560,14 +698,22 @@ with tab4:
     inputs = dict(units=tbl.round(6).to_dict("list"), L=ss.L, D=ss.D,
                   fill=[ss.bf_type, ss.bf_water, ss.bf_res, ss.bf_K, ss.bf_U, ss.bf_Th],
                   ert=[arr, ert_sp, ert_mn, ert_step, ert_tool_d], em=[em_sp, em_f, em_step],
-                  gr=[gr_step, gr_events, gr_cd, gr_cl, gr_td])
+                  gr=[gr_step, gr_events, gr_cd, gr_cl, gr_td],
+                  nmr=[nmr_f, nmr_td, nmr_md, nmr_br, nmr_ap, nmr_te, nmr_ne, nmr_noise, nmr_step, backfill_nmr()])
     key = json.dumps(inputs, sort_keys=True, default=str)
-    bad_tools = (run_ert and not ert_sp) or (run_em and not (em_sp and em_f)) or (run_gr and gr_td >= ss.D)
-    if st.button("▶ Run", type="primary", disabled=not (run_ert or run_em or run_gr) or bad_tools):
-        from geometry_class.study import run_em as do_em, run_ert as do_ert, run_gamma as do_gr
-        parts = []
+    bad_tools = (run_ert and not ert_sp) or (run_em and not (em_sp and em_f)) or (run_gr and gr_td >= ss.D) \
+        or (run_nmr and not nmr_ok)
+    if st.button("▶ Run", type="primary", disabled=not (run_ert or run_em or run_gr or run_nmr) or bad_tools):
+        from geometry_class.study import run_em as do_em, run_ert as do_ert, run_gamma as do_gr, run_nmr as do_nmr
+        parts, spectra = [], None
         with st.status("Simulating ...", expanded=True) as status:
             try:
+                if run_nmr:
+                    log, spectra = do_nmr(tbl, ss.L, ss.D, backfill_nmr(), [f * 1e3 for f in nmr_f], nmr_step,
+                                          progress=st.write, tool_diameter=nmr_td, magnet_diameter=nmr_md,
+                                          remanence=nmr_br, aperture=nmr_ap, echo_spacing=nmr_te * 1e-3,
+                                          n_echoes=int(nmr_ne), noise=nmr_noise / 100)
+                    parts.append(log)
                 if run_em:
                     parts.append(do_em(tbl, ss.L, ss.D, ss.bf_res, em_sp, em_f, em_step, progress=st.write))
                 if run_gr:
@@ -587,7 +733,7 @@ with tab4:
                         slots.release()
                 status.update(label="Done", state="complete", expanded=False)
                 ss.results, ss.results_key = pd.concat(parts, ignore_index=True), key
-                ss.results_tbl = tbl
+                ss.results_tbl, ss.results_t2 = tbl, spectra
             except Exception as e:  # noqa: BLE001
                 status.update(label="Simulation failed", state="error")
                 st.exception(e)
@@ -613,6 +759,13 @@ with tab4:
         c2.markdown("Ratio at the middle of each unit (nearest station)")
         c2.dataframe(pd.DataFrame(mids).pivot_table(index="unit", columns="tool", values="ratio", sort=False),
                      width="stretch")
+        if ss.get("results_t2"):
+            st.subheader("NMR: T2 distributions")
+            st.pyplot(plot_t2(ss.results_t2, rtbl))
+            st.markdown("NMR at the middle of each unit (nearest station). Water contents are volume fractions; "
+                        "**mobile** water has T2 > 33 ms, **bound** water < 33 ms. K SDR = 4 φ⁴ T2LM² mD "
+                        "(sandstone constant, not calibrated for your aquifer).")
+            st.dataframe(nmr_table(res, rtbl, ss.L).round(3), hide_index=True, width="stretch")
         buf = io.StringIO()
         res.to_csv(buf, index=False)
         st.download_button("Download the logs (CSV)", buf.getvalue(), "pyborehole_logs.csv", "text/csv")

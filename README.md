@@ -1,10 +1,10 @@
-# PyBorehole: borehole backfill effect on resistivity, induction and gamma-ray logs
+# PyBorehole: borehole backfill effect on resistivity, induction, gamma-ray and NMR logs
 
 [![PyPI](https://img.shields.io/pypi/v/pyborehole)](https://pypi.org/project/pyborehole/)
 [![Python](https://img.shields.io/pypi/pyversions/pyborehole)](https://pypi.org/project/pyborehole/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](https://github.com/mariosgeo/PyBorehole/blob/main/LICENSE)
 
-PyBorehole simulates what a borehole **resistivity tool (ERT, PyGIMLi)**, an **electromagnetic induction tool (FDEM, SimPEG)** and a **natural gamma-ray tool (Monte Carlo, Geant4)** measure in a backfilled borehole through a layered earth. All tools are simulated with and without the borehole, so you can see how much the backfill distorts each log.
+PyBorehole simulates what a borehole **resistivity tool (ERT, PyGIMLi)**, an **electromagnetic induction tool (FDEM, SimPEG)**, a **natural gamma-ray tool (Monte Carlo, Geant4)** and a **slim NMR probe (water-well type)** measure in a backfilled borehole through a layered earth. All tools are simulated with and without the borehole, so you can see how much the backfill distorts each log.
 
 You provide:
 
@@ -44,8 +44,8 @@ The [Streamlit](https://streamlit.io) app opens in the browser with four tabs:
 
 1. **Geometry**: borehole depth and diameter, and the units as a table of top and bottom depths. Each unit gets an identifier (U1, U2, ...) in depth order; gaps and overlaps are reported.
 2. **Properties**: for each unit, a lithology from 36 types in six families (gravels; sands from coarse to fine, clayey, glauconitic, arkosic and heavy-mineral; silts and loess; clays: kaolinitic, illitic, smectitic, marine, lacustrine, organic; tills, boulder clay and peat; sandstone, siltstone, mudstone, shale, black shale, marl, limestone, chalk, dolomite) and a pore water (fresh, brackish, salt) from the built-in database ([`petrophysics.py`](https://github.com/mariosgeo/PyBorehole/blob/main/geometry_class/petrophysics.py)). The values (porosity, a, m, n, cation-exchange capacity CEC, K, U, Th, grain density) can then be edited. The bulk resistivity follows the **Waxman–Smits** model for shaly sediments, σ = (φ<sup>m</sup> Sw<sup>n</sup> / a) · (1/ρw + B·Qv / Sw), with Qv = CEC/100 · ρgrain (1 − φ)/φ the exchange cations per pore volume and B = 4.6 [1 − 0.6 exp(−0.77/ρw)] their conductance (Waxman & Smits 1968). Clay conduction thus grows with salinity and with decreasing saturation; CEC = 0 is Archie's law (clean sand, gravel). Plain Archie would overestimate a clay in fresh water more than tenfold (99 instead of 7 Ω·m for the database clay). The resistivity can also be overridden. The borehole fill (water, filter sand, bentonite or cement grout) is set here too.
-3. **Tools**: ERT array (Wenner, normal or lateral) with its spacings and an optional insulating tool body; EM coil spacings and frequencies; gamma-ray probe size and statistics.
-4. **Run**: tick ERT, EM and/or gamma ray (unavailable simulators are greyed out with the reason) and run. The app plots the model next to the resistivity and gamma-ray logs, with and without the borehole, the borehole effect per tool, and a table of the effect in the middle of each unit; the logs can be downloaded as CSV.
+3. **Tools**: ERT array (Wenner, normal or lateral) with its spacings and an optional insulating tool body; EM coil spacings and frequencies; gamma-ray probe size and statistics; NMR probe (frequencies, which set the sensitive shells, magnet, echo spacing, noise).
+4. **Run**: tick ERT, EM, gamma ray and/or NMR (unavailable simulators are greyed out with the reason) and run. The app plots the model next to the resistivity, NMR and gamma-ray logs (and the NMR T2 distributions), with and without the borehole, the borehole effect per tool, and a table of the effect in the middle of each unit; the logs can be downloaded as CSV.
 
 Run times on a 24-core PC for the 3-unit example: EM about 35 s, gamma ray 10 s to a few minutes depending on the statistics, ERT about 5 minutes (two 3D solves, several GB of RAM).
 
@@ -98,6 +98,24 @@ Server settings (environment variables, in a Space under **Settings → Variable
 | `PYBOREHOLE_ERT_MIN_GB` | 6 | memory one ERT run needs; ERT is disabled on a server with less |
 | `PYBOREHOLE_MAX_ERT` | memory / `PYBOREHOLE_ERT_MIN_GB` | ERT runs at the same time; further visitors wait in a queue |
 | `PYBOREHOLE_THREADS` | the container's CPU limit | processes for the gamma-ray Monte Carlo |
+
+---
+
+## NMR: slim water-well probe
+
+[`NMRGeometry`](https://github.com/mariosgeo/PyBorehole/blob/main/geometry_class/nmr_geometry.py) simulates a borehole NMR probe of the slim water-well type (like Vista Clara's Javelin). Its magnet makes a field that falls off as 1/r², so each operating frequency excites a thin cylindrical **shell** around the probe; the default probe (60 mm, 450 and 310 kHz) has shells of about 19 and 23 cm diameter. Every unit has a water content and a T2 distribution (database: gravel ~500 ms, sand ~300 ms, silt ~25 ms, clay a few ms with clay-bound water). The CPMG echo train, with diffusion in the field gradient and noise, is inverted for the T2 distribution: total, bound and mobile water, T2 log-mean and an SDR permeability estimate.
+
+The borehole effect of such a probe is sharp: a shell **inside** the borehole reads the fill, not the formation. In a 20 cm water-filled hole the 19 cm shell reads 100 % water with long T2, while the 23 cm shell reads the formation. It needs only NumPy and SciPy and runs in seconds.
+
+```python
+from geometry_class.nmr_geometry import NMRGeometry, NMRMedium
+nmr = NMRGeometry(layers=[(0, 5, NMRMedium(0.32, t2lm=80, t2_sigma=0.4, cbw=0.05)),
+                          (5, 10, NMRMedium(0.45, t2lm=4, t2_sigma=0.4, cbw=0.7))],
+                  borehole_length=10, borehole_diameter=0.2, fill=NMRMedium(1.0, 2500, 0.05))
+print(nmr.shells())                    # frequency, shell diameter, field gradient
+log = nmr.run()                        # water, clay_bound, capillary, mobile, t2lm_ms, K_sdr_m_day per station and shell
+ref = nmr.run(include_borehole=False)  # no-borehole reference
+```
 
 ---
 
@@ -371,6 +389,7 @@ The gamma-ray tests (`tests/test_gamma.py`, about 30 s) are skipped when Geant4 
 - Focused induction tools are represented by one bucking receiver per coil pair; commercial tools use their own (often proprietary) coil sets.
 - The default EM solver is axisymmetric (exact for a centred coaxial tool in flat layers). The 3D octree solver handles off-centre tools and transverse coils but takes ~10 s per tool position and frequency, so it is meant for selected depths rather than full logs.
 - EM `real`, `amplitude` and `phase` are not meaningful at these low induction numbers (the in-phase secondary field is ~1e-8 of the primary); use the quadrature (`imag`) or the apparent resistivity.
+- The NMR probe is centred, its magnet is long (field 1/r²), and the excitation is ideal (perfect pulses, uniform sensitivity over the shell and the sensitive length). T2 does not change with saturation (unsaturated units keep the saturated distribution, scaled to their water content), and the SDR permeability uses the sandstone constant: calibrate it for your aquifer.
 - The gamma-ray tool is centred, and its interior above and below the crystal is modelled as air (the photomultiplier and electronics are not modelled). Sources are the main gamma lines of K-40 and of the U and Th series in secular equilibrium. Electrons, positrons and fluorescence photons created outside the crystal are not tracked (their contribution is well under 1%). The gamma-ray logs carry Monte Carlo noise (`cps_err` / `GR_err`, about 2% per station by default).
 - Gamma-ray materials are water-saturated mineral mixtures (`MATERIALS` in `gamma_geometry.py`). The backfill radioactivities in `run_combined.py` are typical values, not measurements; replace them with assays of your own grout or sand if you have them.
 
@@ -391,6 +410,7 @@ geometry_class/
     gamma_openmc.py           the same gamma-ray problem in OpenMC (independent check, runs in WSL)
     analytic.py               exact reference solutions used by the tests
     plotting.py               drawing helpers (tools-in-the-hole close-up)
+    nmr_geometry.py           NMR: slim water-well probe, shells, echo trains, T2 inversion
     petrophysics.py           built-in lithology / water / fill database, Waxman-Smits model
     study.py                  runs ERT, EM and gamma ray for one model (used by the app)
     app.py, launch_app.py     the Streamlit app and the pyborehole-app command
@@ -402,6 +422,7 @@ geometry_class/
 tests/test_validation.py      validation against the analytic solutions
 tests/test_gamma.py           gamma-ray validation (Geant4, OpenMC)
 tests/test_petrophysics.py    Waxman-Smits / Archie and the built-in database
+tests/test_nmr.py             NMR shells, recovery of water content and T2, borehole effect
 docs/user_guide.md            full documentation
 docs/INSTALL.md               step-by-step installation (Python, Geant4, OpenMC)
 docs/gamma_ray_geant4.docx    how the gamma-ray simulation works (Word)

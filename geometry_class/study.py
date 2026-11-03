@@ -11,10 +11,11 @@ Every function returns a DataFrame with the columns
 
     tool    name of the curve (array / spacing / frequency)
     depth   tool reference depth (m)
-    value   apparent resistivity (Ohm.m) or gamma ray (API)
+    value   apparent resistivity (Ohm.m), gamma ray (API) or NMR water content (-)
     case    "borehole" or "no borehole"
 
-plus, for the gamma ray, ``error`` (1-sigma Monte Carlo error, API).
+plus, for the gamma ray, ``error`` (1-sigma Monte Carlo error, API), and for
+NMR the bound / mobile water, T2 log-mean and permeability estimate.
 """
 from __future__ import annotations
 
@@ -133,6 +134,34 @@ def run_gamma(units: pd.DataFrame, borehole_length: float, borehole_diameter: fl
                                  "error": log["GR_err"], "K": log["K_app"], "U": log["U_app"],
                                  "Th": log["Th_app"], "case": case}))
     return pd.concat(out, ignore_index=True)
+
+
+def run_nmr(units: pd.DataFrame, borehole_length: float, borehole_diameter: float,
+            fill: dict, frequencies: Sequence[float] = (450e3, 310e3), measuring_spacing: float = 0.1,
+            progress=None, **probe):
+    """Borehole NMR (slim water-well probe). ``units`` needs columns water_content
+    (volume fraction), t2lm (ms), t2_sigma and cbw; ``fill`` is a dict (water, t2lm,
+    t2_sigma, cbw). ``probe``: further NMRGeometry settings (tool_diameter,
+    magnet_diameter, remanence, aperture, echo_spacing, n_echoes, noise, ...).
+
+    Returns (log, spectra): the log in the common format (tool = "NMR water
+    d=19 cm" per shell, value = total water content) with the NMR quantities as
+    extra columns, and the T2 distributions {(case, shell diameter): (t2_grid,
+    depths, distributions)}."""
+    from .nmr_geometry import NMRGeometry, NMRMedium
+    say = progress or (lambda msg: None)
+    u = units.sort_values("top")
+    layers = [(r.top, r.bottom, NMRMedium(r.water_content, r.t2lm, r.t2_sigma, r.cbw)) for r in u.itertuples()]
+    nmr = NMRGeometry(layers=layers, borehole_length=borehole_length, borehole_diameter=borehole_diameter,
+                      fill=NMRMedium(**fill), frequencies=frequencies, measuring_spacing=measuring_spacing, **probe)
+    out, spectra = [], {}
+    for case, include in (("no borehole", False), ("borehole", True)):
+        say(f"NMR: {case}")
+        log, spec = nmr.run(include_borehole=include, return_spectra=True)
+        out.append(log.assign(tool=[f"NMR water d={d * 100:.0f} cm" for d in log["diameter"]],
+                              value=log["water"], case=case))
+        spectra.update({(case, d): v for d, v in spec.items()})
+    return pd.concat(out, ignore_index=True), spectra
 
 
 def borehole_effect(results: pd.DataFrame) -> pd.DataFrame:

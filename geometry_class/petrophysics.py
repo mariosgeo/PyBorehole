@@ -5,8 +5,8 @@ petrophysics.py
 
 A small built-in database of lithologies, pore waters and borehole fills, and
 the rock-physics relations that turn them into the inputs of the simulators:
-bulk resistivity (ERT, EM), and material, bulk density and K, U, Th (gamma
-ray).
+bulk resistivity (ERT, EM), material, bulk density and K, U, Th (gamma ray),
+and water content and T2 distribution (NMR).
 
 Bulk resistivity follows the Waxman-Smits (1968) model for shaly sediments:
 
@@ -128,6 +128,36 @@ LITHOLOGIES: Dict[str, dict] = {
 }
 
 # ---------------------------------------------------------------------------
+# NMR (borehole nuclear magnetic resonance)
+# ---------------------------------------------------------------------------
+# Water-saturated T2 distribution of each lithology, as a slim borehole NMR
+# probe would see it in zero field gradient: a log-normal main mode with
+# log-mean t2lm (ms) and spread t2_sigma (decades), plus a clay-bound fraction
+# cbw of the pore water at T2 = 2 ms. T2 follows pore size (surface
+# relaxation): gravel and coarse sand ~0.3-1 s, fine sand ~0.1 s, silt tens of
+# ms, clay a few ms. Iron-rich (glauconitic, heavy-mineral) sands relax faster.
+# Typical values for orientation, not measurements.
+NMR_PROPERTIES: Dict[str, tuple] = {   # name: (t2lm ms, t2_sigma decades, cbw)
+    "Gravel": (500, 0.35, 0.00), "Gravel, sandy": (400, 0.35, 0.00), "Gravel, clayey": (150, 0.50, 0.08),
+    "Sand": (300, 0.30, 0.00), "Sand, coarse": (450, 0.30, 0.00), "Sand, medium": (300, 0.30, 0.00),
+    "Sand, fine": (150, 0.30, 0.02), "Silty sand": (80, 0.40, 0.05), "Sand, clayey": (40, 0.45, 0.12),
+    "Sand, glauconitic": (30, 0.40, 0.10), "Sand, arkosic": (200, 0.35, 0.02),
+    "Sand, heavy-mineral": (40, 0.35, 0.00),
+    "Silt": (25, 0.40, 0.15), "Silt, clayey": (12, 0.45, 0.30), "Loess": (20, 0.45, 0.20),
+    "Clay": (4, 0.40, 0.70), "Clay, kaolinitic": (8, 0.40, 0.50), "Clay, illitic": (3, 0.40, 0.80),
+    "Clay, smectitic (bentonitic)": (1.5, 0.35, 0.95), "Clay, marine": (3, 0.40, 0.80),
+    "Clay, lacustrine": (4, 0.40, 0.70), "Clay, organic": (5, 0.50, 0.70),
+    "Glacial till": (20, 0.50, 0.30), "Till, sandy": (50, 0.50, 0.15), "Boulder clay": (10, 0.50, 0.50),
+    "Peat": (100, 0.50, 0.20),
+    "Sandstone": (150, 0.35, 0.03), "Sandstone, shaly": (40, 0.45, 0.20), "Siltstone": (8, 0.45, 0.50),
+    "Mudstone": (3, 0.40, 0.80), "Shale": (2, 0.35, 0.90), "Shale, black (organic-rich)": (2, 0.35, 0.90),
+    "Marl": (10, 0.45, 0.50), "Limestone": (200, 0.50, 0.02), "Chalk": (30, 0.25, 0.05),
+    "Dolomite": (250, 0.50, 0.02),
+}
+for _name, (_t2, _s, _cbw) in NMR_PROPERTIES.items():
+    LITHOLOGIES[_name].update(t2lm=float(_t2), t2_sigma=_s, cbw=_cbw)
+
+# ---------------------------------------------------------------------------
 # Pore waters
 # ---------------------------------------------------------------------------
 # resistivity rho_w (Ohm.m) at ~20 C, electrical conductivity for reference,
@@ -156,6 +186,19 @@ BACKFILLS: Dict[str, dict] = {
     "Cement grout":    dict(resistivity=20.0, ws=None, gamma_material="cement",
                             K=0.35, U=2.0, Th=4.0, note="~1.85 g/cm3; resistivity rises as it cures"),
 }
+# NMR of the fills: volumetric water content and T2 distribution (as for the
+# lithologies). Open water relaxes slowly (bulk T2 ~2.5 s); the water in
+# bentonite and in cured cement is bound in nanometre pores (T2 ~1-2 ms), so a
+# slim probe with an echo spacing of 1-2 ms sees it only in part, as short-T2
+# (bound) water.
+BACKFILL_NMR: Dict[str, dict] = {
+    "Water":           dict(water=1.00, t2lm=2500.0, t2_sigma=0.05, cbw=0.0),
+    "Filter sand":     dict(water=0.35, t2lm=400.0, t2_sigma=0.30, cbw=0.0),
+    "Bentonite grout": dict(water=0.75, t2lm=2.0, t2_sigma=0.30, cbw=0.8),
+    "Cement grout":    dict(water=0.50, t2lm=1.0, t2_sigma=0.30, cbw=0.8),
+}
+for _name, _nmr in BACKFILL_NMR.items():
+    BACKFILLS[_name]["nmr"] = _nmr
 
 
 def _check(rho_w: float, porosity: float, sw: float, a: float) -> None:
@@ -252,4 +295,5 @@ def unit_properties(lithology: str, water: str, sw: float = 1.0,
                                                     sw, lit["cec"], lit["grain_density"])
     props["density"] = bulk_density(lit["porosity"], lit["grain_density"], sw, wat["density"])
     props["api"] = gamma_api(lit["K"], lit["U"], lit["Th"])
+    props["water"] = lit["porosity"] * sw          # volumetric water content (NMR)
     return props

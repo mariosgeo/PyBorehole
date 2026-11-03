@@ -15,6 +15,7 @@ Most users only need [`run_combined.py`](../run_combined.py). Read on if you wan
 7. [Testing](#7-testing)
 8. [Troubleshooting](#8-troubleshooting)
 9. [Gamma-ray simulator: `GammaGeometry`](#9-gamma-ray-simulator-gammageometry)
+10. [NMR simulator: `NMRGeometry`](#10-nmr-simulator-nmrgeometry)
 
 ---
 
@@ -438,3 +439,50 @@ About 80 % of the gamma-ray signal comes from within 30 cm of the crystal centre
 - **Radioactivity** of the fill adds its own signal. Bentonite grout contains thorium and uranium and can raise the reading in a clean formation while lowering it in a shale.
 - **Hole size and tool position**: bigger holes and centred tools have larger effects. Only a centred tool is modelled.
 - **Water resistivity does not matter.** Salt changes resistivity a hundredfold but density by only a few percent. In a 0.2 m hole in sand, fresh water and seawater (35 g/kg NaCl) both give 0.767 ± 0.006 of the no-hole count rate. A **KCl** brine is different because potassium is radioactive: 5 % KCl (2.6 % K) gives 0.920, i.e. 20 % more than fresh water.
+
+---
+
+## 10. NMR simulator: `NMRGeometry`
+
+`NMRGeometry` ([`geometry_class/nmr_geometry.py`](../geometry_class/nmr_geometry.py)) simulates a slim borehole NMR probe of the water-well type (like Vista Clara's Javelin) in the same layered earth and borehole. It needs only NumPy and SciPy; a full log takes a few seconds.
+
+### The probe
+
+A long permanent magnet, magnetised across its axis, makes a field that falls off with the distance r from the axis, B0 = Br a² / (2 r²) (Br remanence, a magnet radius). Each operating frequency f excites the hydrogen nuclei where the Larmor condition holds, B0 = 2πf/γ: a thin cylindrical **shell** of radius r = √(Br a² / (2 B0)). Several frequencies give several shells, i.e. depths of investigation. The field gradient on the shell, G = 2 B0 / r, sets the diffusion damping of the echoes; the shell thickness follows from the excitation bandwidth.
+
+| Parameter | Default | Meaning |
+|---|---|---|
+| `frequencies` | 450, 310 kHz | One sensitive shell each (here ≈ 19 and 23 cm diameter) |
+| `tool_diameter` | 0.060 m | Probe diameter; a shell inside the probe is rejected |
+| `magnet_diameter`, `remanence` | 0.025 m, 1.2 T | The magnet (NdFeB ≈ 1.2 T) |
+| `aperture` | 0.5 m | Vertical length of the sensitive region |
+| `echo_spacing`, `n_echoes` | 1.5 ms, 1000 | CPMG echo train |
+| `noise` | 0.02 | Noise per echo after stacking, in water-content units |
+| `regularization` | 10 | Tikhonov weight of the T2 inversion |
+| `sdr_c` | 4 mD/ms² | SDR constant (sandstone value) |
+
+The defaults are typical of slim water-well probes, not a copy of a commercial design: set the values of your probe.
+
+### Materials and signal
+
+Every unit is an `NMRMedium`: water content (porosity × saturation), and a T2 distribution, a log-normal main mode (`t2lm` in ms, spread `t2_sigma` in decades) plus a clay-bound fraction `cbw` at T2 = 2 ms. The database gives these for all lithologies (T2 follows pore size: gravel ≈ 500 ms, sand ≈ 300 ms, silt ≈ 25 ms, clay a few ms) and for the fills (open water T2 ≈ 2.5 s; bentonite and cement grout ≈ 1–2 ms).
+
+Each material on the shell adds water content × Σ p_k exp(−t / T2app,k) to the echo train, with 1/T2app = 1/T2 + D (γ G TE)² / 12 (diffusion of water in the gradient). Noise is added, and the echo train is inverted for the T2 distribution by non-negative least squares with Tikhonov regularisation.
+
+### Output of `run()`
+
+One row per station and shell: `water` (total NMR water content), `clay_bound` (T2 < 3 ms), `capillary` (3–33 ms), `mobile` (> 33 ms), `t2lm_ms` (T2 log-mean), `k_sdr_md` and `K_sdr_m_day` (SDR permeability, k = c φ⁴ T2LM², and the hydraulic conductivity for water at 20 °C), and the true `true_water`, `true_mobile` of the formation at the station. `run(return_spectra=True)` also returns the T2 distributions.
+
+### Accuracy
+
+- Without noise, the inversion recovers the water content and the mobile water of thick units within a few percent (`tests/test_nmr.py`).
+- With the default noise (2 % per echo) the water content scatters by about ±2–3 % per station.
+- Clay-bound water (T2 ≈ 2 ms) decays quickly against an echo spacing of 1.5 ms; with realistic noise it is underestimated (the example clay reads ≈ 0.35 instead of 0.45). This is the real limitation of slim probes, not an artefact.
+
+### The borehole effect
+
+The shell is thin, so the effect is sharp. Where the shell lies **inside** the borehole the probe measures the fill, not the formation: in a 20 cm water-filled hole the 19 cm shell reads ≈ 100 % water with a long T2 (and a meaningless SDR permeability), whereas the 23 cm shell reads the formation unchanged. Bentonite grout, whose water is bound, appears as short-T2 bound water instead. Probes of this type therefore need boreholes narrower than their shells; the app warns when a shell lies inside the hole.
+
+### Limitations
+
+The probe is centred, the magnet long, the excitation ideal (perfect pulses, uniform sensitivity over the shell and the sensitive length). T2 does not change with saturation: an unsaturated unit keeps its saturated distribution, scaled to its water content. The SDR constant is the sandstone value; calibrate it against pumping or slug tests for your aquifer.
